@@ -222,6 +222,20 @@ function findCookie(cookieHeader: string | null, name: string): string | null | 
   return matches[0]!.slice(name.length + 1);
 }
 
+export function getSignedActionSessionToken(
+  cookieHeader: string | null,
+): string | null {
+  const token = findCookie(cookieHeader, ACTION_SESSION_COOKIE_NAME);
+  if (
+    token === null ||
+    token === "DUPLICATE" ||
+    token.length > MAX_ACTION_SESSION_COOKIE_BYTES
+  ) {
+    return null;
+  }
+  return token;
+}
+
 export function readSignedActionSession(
   cookieHeader: string | null,
   secret: string | undefined,

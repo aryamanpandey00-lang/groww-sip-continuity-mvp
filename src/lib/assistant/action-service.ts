@@ -9,7 +9,11 @@ import {
 } from "@/lib/domain/action-engine";
 import { demoPolicy } from "@/lib/domain/policy";
 import { getRewardProgress } from "@/lib/domain/reward-engine";
-import { markActionPreviewConsumed } from "./action-replay-guard";
+import {
+  isLatestActionSession,
+  markActionPreviewConsumed,
+  revokeActionSession,
+} from "./action-replay-guard";
 import type {
   ActionPreview,
   DemoInvestorState,
@@ -27,6 +31,7 @@ import {
   createActionDemoSession,
   readSignedActionSession,
   signActionDemoSession,
+  getSignedActionSessionToken,
   type ActionDemoSession,
 } from "./action-session";
 import type { AssistantDemoScenario } from "@/lib/domain/fixtures/assistant-scenarios";
@@ -211,7 +216,23 @@ export function resolveActionSession(input: {
       replacedForScenario: false,
     };
   }
+  const token = getSignedActionSessionToken(input.cookieHeader);
+  if (
+    token === null ||
+    !isLatestActionSession(stored.session.sessionId, token, input.nowMs)
+  ) {
+    return "INVALID";
+  }
   if (stored.session.scenario !== input.scenario) {
+    if (
+      !revokeActionSession(
+        stored.session.sessionId,
+        Date.parse(stored.session.expiresAt),
+        input.nowMs,
+      )
+    ) {
+      return "INVALID";
+    }
     if (stored.session.pendingPreview) {
       markActionPreviewConsumed(
         stored.session.pendingPreview.previewId,
@@ -241,6 +262,13 @@ export function assistantStateFromSignedSession(input: {
   if (stored.status !== "VALID" || stored.session.scenario !== input.scenario) {
     return null;
   }
+  const token = getSignedActionSessionToken(input.cookieHeader);
+  if (
+    token === null ||
+    !isLatestActionSession(stored.session.sessionId, token, input.nowMs)
+  ) {
+    return null;
+  }
   return stored.session;
 }
 
@@ -263,11 +291,30 @@ export function createAiApprovedActionPreview(input: {
   );
   if (stored.status === "INVALID" || stored.status === "EXPIRED") return null;
 
+  if (stored.status === "VALID") {
+    const token = getSignedActionSessionToken(input.cookieHeader);
+    if (
+      token === null ||
+      !isLatestActionSession(stored.session.sessionId, token, input.nowMs)
+    ) {
+      return null;
+    }
+  }
+
   if (
     stored.status === "VALID" &&
     stored.session.scenario !== input.scenario &&
     stored.session.pendingPreview
   ) {
+    if (
+      !revokeActionSession(
+        stored.session.sessionId,
+        Date.parse(stored.session.expiresAt),
+        input.nowMs,
+      )
+    ) {
+      return null;
+    }
     markActionPreviewConsumed(
       stored.session.pendingPreview.previewId,
       Date.parse(stored.session.pendingPreview.expiresAt),

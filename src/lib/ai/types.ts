@@ -173,9 +173,25 @@ export type AssistantModelCallResult =
       modelId?: string;
       usage?: AssistantTokenUsage;
     }
-  | { status: "TIMEOUT"; errorCode?: string }
-  | { status: "UNAVAILABLE"; errorCode?: string }
-  | { status: "INVALID_OUTPUT"; errorCode?: string };
+  | { status: "TIMEOUT"; errorCode?: string; usage?: AssistantTokenUsage }
+  | { status: "UNAVAILABLE"; errorCode?: string; usage?: AssistantTokenUsage }
+  | { status: "INVALID_OUTPUT"; errorCode?: string; usage?: AssistantTokenUsage };
+
+export interface AssistantTokenBudgetReservation {
+  /** Settle with reported usage, or null to charge the full reservation. */
+  settle(actualTokens: number | null): Promise<void> | void;
+}
+
+export interface AssistantTokenBudgetCoordinator {
+  /** Production adapters must declare a deployment-wide atomic scope. */
+  scope: "deployment-shared" | "process-local";
+  /** Production reservations must be atomic across the whole deployment. */
+  reserve(input: {
+    reservationId: string;
+    maxTokens: number;
+    nowMs: number;
+  }): Promise<AssistantTokenBudgetReservation | null> | AssistantTokenBudgetReservation | null;
+}
 
 export interface AssistantModelClient {
   respond(request: AssistantModelRequest): Promise<AssistantModelCallResult>;
@@ -301,6 +317,8 @@ export interface AssistantModelDiagnostics {
   modelId: string | null;
   latencyMs: number;
   usage: AssistantTokenUsage | null;
+  modelCalls: number;
+  usageComplete: boolean;
 }
 
 export interface AssistantResult {
@@ -340,6 +358,8 @@ export interface AssistantLogEvent {
   modelId: string | null;
   latencyMs: number;
   tokenUsage: AssistantTokenUsage | null;
+  modelCalls: number;
+  tokenUsageComplete: boolean;
   repairAttempted: boolean;
   timestamp: string;
 }
@@ -350,6 +370,7 @@ export interface AssistantDependencies {
   env?: Record<string, string | undefined>;
   config?: AssistantConfig;
   modelClient?: AssistantModelClient;
+  budgetCoordinator?: AssistantTokenBudgetCoordinator;
   log?: AssistantLogSink;
   requestId?: string;
   now?: () => Date;

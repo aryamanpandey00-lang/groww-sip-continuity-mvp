@@ -25,6 +25,12 @@ import {
 import { emitAssistantLog } from "./logger";
 import { detectMissingInformation } from "./missing-info";
 import {
+  createAssistantBudgetReservationId,
+  estimateMaxAssistantCallTokens,
+  normalizeAssistantTokenUsage,
+  resolveAssistantTokenBudgetCoordinator,
+} from "./token-budget";
+import {
   buildAssistantModelRequest,
   buildRepairModelRequest,
 } from "./prompts";
@@ -34,6 +40,7 @@ import type {
   AssistantIntent,
   AssistantModelCallResult,
   AssistantModelClient,
+  AssistantTokenBudgetCoordinator,
   AssistantModelDiagnostics,
   AssistantRequest,
   AssistantResult,
@@ -46,45 +53,133 @@ interface CallTelemetry {
   latencyMs: number;
   modelId: string | null;
   usage: AssistantTokenUsage | null;
+  modelCalls: number;
+  usageComplete: boolean;
+}
+
+interface ModelAttempt {
+  result: AssistantModelCallResult;
+  telemetry: CallTelemetry;
 }
 
 async function callModel(
   client: AssistantModelClient,
   request: ReturnType<typeof buildAssistantModelRequest>,
-): Promise<{ result: AssistantModelCallResult; telemetry: CallTelemetry }> {
+  budgetCoordinator: AssistantTokenBudgetCoordinator,
+  maxOutputTokens: number,
+): Promise<ModelAttempt> {
   const startedAt = Date.now();
+  let reservation;
 
   try {
-    const result = await client.respond(request);
-
-    return {
-      result,
-      telemetry: {
-        latencyMs: Date.now() - startedAt,
-        modelId: result.status === "OK" ? (result.modelId ?? null) : null,
-        usage: result.status === "OK" ? (result.usage ?? null) : null,
-      },
-    };
+    reservation = await budgetCoordinator.reserve({
+      reservationId: createAssistantBudgetReservationId(),
+      maxTokens: estimateMaxAssistantCallTokens(request, maxOutputTokens),
+      nowMs: Date.now(),
+    });
   } catch {
+    reservation = null;
+  }
+
+  if (!reservation) {
     return {
-      result: { status: "UNAVAILABLE", errorCode: "client_exception" },
+      result: { status: "UNAVAILABLE", errorCode: "token_budget_unavailable" },
       telemetry: {
-        latencyMs: Date.now() - startedAt,
+        latencyMs: 0,
         modelId: null,
         usage: null,
+        modelCalls: 0,
+        usageComplete: true,
       },
     };
   }
+
+  let result: AssistantModelCallResult;
+
+  try {
+    result = await client.respond(request);
+  } catch {
+    result = { status: "UNAVAILABLE", errorCode: "client_exception" };
+  }
+
+  const normalizedUsage = normalizeAssistantTokenUsage(result.usage);
+  let settlementFailed = false;
+
+  try {
+    await reservation.settle(
+      normalizedUsage.complete
+        ? normalizedUsage.usage?.totalTokens ?? null
+        : null,
+    );
+  } catch {
+    settlementFailed = true;
+  }
+
+  const normalizedResult = settlementFailed
+    ? {
+        status: "UNAVAILABLE" as const,
+        errorCode: "token_budget_settlement_failed",
+        usage: normalizedUsage.usage ?? undefined,
+      }
+    : { ...result, usage: normalizedUsage.usage ?? undefined };
+
+  return {
+    result: normalizedResult,
+    telemetry: {
+      latencyMs: Date.now() - startedAt,
+      modelId:
+        normalizedResult.status === "OK"
+          ? normalizedResult.modelId ?? null
+          : null,
+      usage: normalizedUsage.usage,
+      modelCalls: 1,
+      usageComplete: normalizedUsage.complete,
+    },
+  };
+}
+
+function addUsage(
+  previous: AssistantTokenUsage | null,
+  next: AssistantTokenUsage | null,
+  previousCallCount: number,
+): AssistantTokenUsage | null {
+  if (previousCallCount === 0) return next;
+  if (previous === null) return next;
+  if (next === null) return previous;
+
+  const add = (
+    left: number | undefined,
+    right: number | undefined,
+  ): number | undefined => {
+    if (left === undefined) return right;
+    if (right === undefined) return left;
+    const sum = left + right;
+    return Number.isSafeInteger(sum) ? sum : undefined;
+  };
+
+  const usage = {
+    inputTokens: add(previous.inputTokens, next.inputTokens),
+    outputTokens: add(previous.outputTokens, next.outputTokens),
+    totalTokens: add(previous.totalTokens, next.totalTokens),
+  };
+
+  return Object.values(usage).some((value) => value !== undefined)
+    ? usage
+    : null;
 }
 
 function mergeTelemetry(
   previous: CallTelemetry | null,
   next: CallTelemetry,
-): CallTelemetry {
+): CallTelemetry | null {
+  if (next.modelCalls === 0) return previous;
+  if (previous === null) return next;
   return {
-    latencyMs: (previous?.latencyMs ?? 0) + next.latencyMs,
-    modelId: next.modelId ?? previous?.modelId ?? null,
-    usage: next.usage ?? previous?.usage ?? null,
+    latencyMs: previous.latencyMs + next.latencyMs,
+    modelId: next.modelId ?? previous.modelId,
+    usage: addUsage(previous.usage, next.usage, previous.modelCalls),
+    modelCalls: previous.modelCalls + next.modelCalls,
+    usageComplete: previous.usageComplete && next.usageComplete,
   };
 }
 
@@ -136,6 +231,8 @@ function modelDiagnostics(
     modelId: telemetry.modelId,
     latencyMs: telemetry.latencyMs,
     usage: telemetry.usage,
+    modelCalls: telemetry.modelCalls,
+    usageComplete: telemetry.usageComplete,
   };
 }
 
@@ -226,6 +323,8 @@ export async function runAssistant(
       modelId: result.model?.modelId ?? null,
       latencyMs: Date.now() - startedAt,
       tokenUsage: result.model?.usage ?? null,
+      modelCalls: result.model?.modelCalls ?? 0,
+      tokenUsageComplete: result.model?.usageComplete ?? true,
       repairAttempted,
       timestamp: generatedAt,
     });
@@ -323,6 +422,15 @@ export async function runAssistant(
     state,
   });
 
+  const budgetCoordinator = resolveAssistantTokenBudgetCoordinator(
+    dependencies.env ?? process.env,
+    dependencies.budgetCoordinator,
+  );
+
+  if (!budgetCoordinator) {
+    return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
+  }
+
   let modelClient = dependencies.modelClient;
 
   if (!modelClient) {
@@ -337,6 +445,8 @@ export async function runAssistant(
   const firstCall = await callModel(
     modelClient,
     buildAssistantModelRequest(packet),
+    budgetCoordinator,
+    config.maxOutputTokens,
   );
   telemetry = mergeTelemetry(telemetry, firstCall.telemetry);
 
@@ -366,6 +476,8 @@ export async function runAssistant(
         gateEvaluation.result.criticalFailures.map((failure) => failure.code),
         previousOutput,
       ),
+      budgetCoordinator,
+      config.maxOutputTokens,
     );
     telemetry = mergeTelemetry(telemetry, repairCall.telemetry);
 

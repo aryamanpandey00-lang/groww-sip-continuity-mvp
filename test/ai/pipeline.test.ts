@@ -5,7 +5,9 @@ import type {
   AssistantLogEvent,
   AssistantModelCallResult,
   AssistantModelOutput,
+  AssistantTokenBudgetCoordinator,
 } from "@/lib/ai/types";
+import { createInMemoryAssistantTokenBudgetCoordinator } from "@/lib/ai/token-budget";
 import {
   PAYMENT_QUESTION,
   READY_CONFIG,
@@ -33,6 +35,7 @@ function run(
     requestId?: string;
     state?: ReturnType<typeof cloneDemoInvestorState>;
     config?: typeof READY_CONFIG | null;
+    budgetCoordinator?: AssistantTokenBudgetCoordinator | null;
   } = {},
 ) {
   const modelClient = fakeModelClient(results);
@@ -40,6 +43,14 @@ function run(
     overrides.config === null
       ? undefined
       : (overrides.config ?? READY_CONFIG);
+  const budgetCoordinator =
+    overrides.budgetCoordinator === null
+      ? undefined
+      : overrides.budgetCoordinator ??
+        createInMemoryAssistantTokenBudgetCoordinator({
+          maxTokens: 1_000_000,
+          windowMs: 60_000,
+        });
 
   return {
     modelClient,
@@ -53,6 +64,7 @@ function run(
         config,
         env: overrides.env,
         modelClient,
+        budgetCoordinator,
         log: overrides.log ?? (() => {}),
         requestId: overrides.requestId ?? "req_test_1",
         now: FIXED_NOW,
@@ -216,20 +228,47 @@ describe("assistant pipeline model approval, repair and fallback", () => {
       outputTokens: 50,
       totalTokens: 150,
     });
+    expect(result.model?.modelCalls).toBe(1);
+    expect(result.model?.usageComplete).toBe(true);
     expect(state).toEqual(before);
   });
 
   it("repairs one failed structured output and then approves it", async () => {
-    const { modelClient, promise } = run(PAYMENT_QUESTION, [
-      { status: "OK", outputText: "not json", modelId: "mock-model-v1" },
-      okResult(validPaymentOutput()),
-    ]);
+    const budget = createInMemoryAssistantTokenBudgetCoordinator({
+      maxTokens: 100_000,
+      windowMs: 60_000,
+    });
+    const { modelClient, promise } = run(
+      PAYMENT_QUESTION,
+      [
+        {
+          status: "OK",
+          outputText: "not json",
+          modelId: "mock-model-v1",
+          usage: { inputTokens: 20, outputTokens: 10, totalTokens: 30 },
+        },
+        {
+          ...okResult(validPaymentOutput()),
+          usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+        },
+      ],
+      { budgetCoordinator: budget },
+    );
     const result = await promise;
 
     expect(modelClient.calls).toHaveLength(2);
     expect(result.status).toBe("APPROVED");
     expect(result.repairAttempted).toBe(true);
     expect(result.repairSucceeded).toBe(true);
+    expect(result.model?.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 60,
+      totalTokens: 180,
+    });
+    expect(result.model?.modelCalls).toBe(2);
+    expect(result.model?.usageComplete).toBe(true);
+    expect(budget.snapshot().spentTokens).toBe(180);
+    expect(budget.snapshot().reservedTokens).toBe(0);
     expect(modelClient.calls[1]?.input).toContain(
       "Failure codes: SCHEMA_INVALID",
     );
@@ -332,6 +371,8 @@ describe("assistant pipeline model approval, repair and fallback", () => {
       qualityLabel: "Limited evidence",
       modelId: "mock-model-v1",
       repairAttempted: false,
+      modelCalls: 1,
+      tokenUsageComplete: true,
     });
     expect(event.retrievedEvidenceIds.length).toBeGreaterThan(0);
     expect(event.tokenUsage).toEqual({
@@ -347,6 +388,41 @@ describe("assistant pipeline model approval, repair and fallback", () => {
     expect(serialized).not.toContain(PAYMENT_QUESTION);
     expect(serialized).not.toContain("The fictional demo debit failed");
     expect(serialized).not.toContain("fictional monthly amount");
+  });
+
+  it("fails closed in production when a shared token-budget coordinator is absent", async () => {
+    const { modelClient, promise } = run(
+      PAYMENT_QUESTION,
+      [okResult(validPaymentOutput())],
+      {
+        env: { NODE_ENV: "production" },
+        budgetCoordinator: null,
+      },
+    );
+    const result = await promise;
+
+    expect(modelClient.calls).toHaveLength(0);
+    expect(result.status).toBe("UNAVAILABLE");
+    expect(result.fallbackReason).toBe("MODEL_UNAVAILABLE");
+    expect(result.model).toBeNull();
+  });
+
+  it("does not call the model when a token reservation is refused", async () => {
+    const budget = createInMemoryAssistantTokenBudgetCoordinator({
+      maxTokens: 1,
+      windowMs: 60_000,
+    });
+    const { modelClient, promise } = run(
+      PAYMENT_QUESTION,
+      [okResult(validPaymentOutput())],
+      { budgetCoordinator: budget },
+    );
+    const result = await promise;
+
+    expect(modelClient.calls).toHaveLength(0);
+    expect(result.status).toBe("UNAVAILABLE");
+    expect(result.model).toBeNull();
+    expect(budget.snapshot()).toEqual({ spentTokens: 0, reservedTokens: 0 });
   });
 
   it("does not execute any action even when a preview is returned", async () => {

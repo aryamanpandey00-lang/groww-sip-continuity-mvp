@@ -235,12 +235,22 @@ Each request emits one JSON event through an injectable logger. The allowlist is
 - model ID when the API provides it;
 - total latency in milliseconds;
 - API-provided token usage only;
+- model-call count and a flag showing whether usage is complete across attempts;
 - repair attempt flags;
 - timestamp.
 
 The logger does not include the API key, prompts, system instructions, user
 questions, answer text, credentials or personal data. The current implementation
-does not claim distributed/global rate limiting.
+adds usage from the initial and repair calls, including invalid or incomplete
+Responses API results. Missing or inconsistent usage is marked incomplete. A
+budget reservation is charged at its reserved maximum when actual usage cannot
+be trusted.
+
+Each attempt reserves a conservative input-plus-output token bound before the
+model call. Local development uses a process-local hourly budget. Production
+requires an injected coordinator whose reservations and settlements are atomic
+across the deployment; without one, the model path returns unavailable before
+calling the provider. No shared coordinator is included in this repository.
 
 ## OpenAI SDK approach
 
@@ -410,14 +420,14 @@ to scenario and state version. The server validates the session schema, token
 size, signature, session expiry, preview expiry and current deterministic
 eligibility before applying a transition.
 
-This is suitable only for a fictional MVP. Stateless signed cookies do not
-provide durable exactly-once execution against deliberate replay or concurrent
-requests across multiple instances, process restarts or regions. The small
-in-process duplicate-confirmation guard is best-effort and does not solve
-distributed replay. The demo must not be presented as production transaction
-safety. Before any paid or public deployment, configure a strong stable secret,
-shared/edge rate limiting and appropriate hosting/request-duration limits.
-There is no database or server-side persistent session store.
+This is suitable only for local fictional practice. A process-local registry
+tracks the latest cookie version for each session, and consumed preview IDs are
+retained until expiry. This rejects same-process stale-cookie rollback and
+replay. It cannot coordinate multiple instances or survive a process restart.
+Production action preview, confirmation and reset endpoints therefore return
+HTTP 503 until an atomic shared session store is wired in. There is no database
+or server-side persistent session store in this repository, so production
+action persistence remains unimplemented.
 
 The browser keeps the signed cookie for the API scope and the UI keeps only
 preview/result display state in React. Confirmed fictional state can be read by
@@ -428,12 +438,11 @@ browser cookie or changing browser/device loses the fictional action state.
 These demo endpoints never connect to Groww, make a real payment, or mutate a
 real account.
 
-Within one server process, the application records consumed preview IDs when a
-preview is confirmed/cancelled, superseded by a newer preview, reset, or
-replaced by a different scenario. This rejects ordinary same-process replay of
-old signed cookies. The guard is bounded and in-memory; it cannot revoke a
-cookie on another instance or after process restart. The stateless cookie design
-therefore still has the replay and exactly-once limitations described above.
+Within one server process, the application also registers each newly issued
+session cookie and rejects older versions, including rollback to a previously
+valid state. Reset and scenario replacement revoke the prior session. These
+controls remain process-local; a shared atomic store is required before action
+routes can be enabled in a production deployment.
 
 ## Phase 6E.1 security and test coverage
 

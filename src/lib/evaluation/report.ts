@@ -20,6 +20,7 @@ import {
   type LoadedFixtureResponses,
   type LoadedGoldenDataset,
 } from "./types";
+import { isResolvedEvidenceLogReference } from "./schema";
 
 export interface BuildEvaluationReportInput {
   dataset: LoadedGoldenDataset;
@@ -70,20 +71,116 @@ function splitMetrics(
   };
 }
 
+function duplicates(values: string[]): string[] {
+  const seen = new Set<string>();
+  const duplicateValues = new Set<string>();
+
+  for (const value of values) {
+    if (seen.has(value)) duplicateValues.add(value);
+    seen.add(value);
+  }
+
+  return [...duplicateValues].sort();
+}
+
+function coverageIssues(
+  label: string,
+  expected: string[],
+  actual: string[],
+): string[] {
+  const issues: string[] = [];
+  const expectedSet = new Set(expected);
+  const actualSet = new Set(actual);
+  const duplicateIds = duplicates(actual);
+  const missingIds = expected.filter((id) => !actualSet.has(id)).sort();
+  const unexpectedIds = actual.filter((id) => !expectedSet.has(id));
+
+  if (duplicateIds.length > 0) {
+    issues.push(`${label} contains duplicate case IDs: ${duplicateIds.join(", ")}.`);
+  }
+  if (missingIds.length > 0) {
+    issues.push(`${label} is missing case IDs: ${missingIds.join(", ")}.`);
+  }
+  if (unexpectedIds.length > 0) {
+    issues.push(`${label} contains unknown case IDs: ${[...new Set(unexpectedIds)].sort().join(", ")}.`);
+  }
+
+  return issues;
+}
+
+function evaluationIntegrityIssues(input: BuildEvaluationReportInput): string[] {
+  const issues: string[] = [];
+  const expectedIds = input.dataset.cases.map((item) => item.id);
+
+  if (!input.dataset.validation.valid) {
+    issues.push("Golden dataset validation did not pass.");
+  }
+  if (!input.fixtures.validation.valid) {
+    issues.push("Fixture-response validation did not pass.");
+  }
+  if (expectedIds.length === 0) {
+    issues.push("The evaluation dataset contains no cases.");
+  }
+  if (duplicates(expectedIds).length > 0) {
+    issues.push(`Golden dataset contains duplicate case IDs: ${duplicates(expectedIds).join(", ")}.`);
+  }
+
+  issues.push(
+    ...coverageIssues(
+      "Fixture responses",
+      expectedIds,
+      input.fixtures.responses.map((item) => item.caseId),
+    ),
+    ...coverageIssues(
+      "Evaluation results",
+      expectedIds,
+      input.caseResults.map((item) => item.caseId),
+    ),
+  );
+
+  return issues;
+}
+
 export function buildEvaluationReport(
   input: BuildEvaluationReportInput,
 ): EvaluationReport {
   const thresholds = input.thresholds ?? DEFAULT_EVALUATION_THRESHOLDS;
   const overall = summarizeCaseResults(input.caseResults);
   const thresholdChecks = checkThresholds(overall, thresholds);
-  const automatedStatus = determineAutomatedStatus(overall, thresholdChecks);
-  const missingHumanReviews = input.caseResults
-    .filter((result) => !result.humanReviewed)
-    .map((result) => result.caseId)
+  const checksBySplit = Object.fromEntries(
+    GOLDEN_SPLITS.map((split) => [
+        split,
+        checkThresholds(
+          summarizeCaseResults(
+            input.caseResults.filter((result) => result.split === split),
+          ),
+          thresholds,
+        ),
+      ]),
+  ) as Record<(typeof GOLDEN_SPLITS)[number], ReturnType<typeof checkThresholds>>;
+  const integrityIssues = evaluationIntegrityIssues(input);
+  const splitThresholdFailed = Object.values(checksBySplit).some((checks) =>
+    checks.some((check) => !check.passed),
+  );
+  let automatedStatus = determineAutomatedStatus(overall, thresholdChecks);
+  if (automatedStatus === "PASS" && splitThresholdFailed) {
+    automatedStatus = "FAIL";
+  }
+  if (integrityIssues.length > 0) {
+    automatedStatus = "BLOCKED";
+  }
+
+  const missingHumanReviews = input.dataset.cases
+    .filter((item) => item.reviewStatus === "pending_human_review")
+    .map((item) => item.id)
     .sort();
-  const unresolvedEvidenceLogReferences = input.caseResults
-    .filter((result) => !result.evidenceLogResolved)
-    .map((result) => result.caseId)
+  const reviewChangesRequestedCaseIds = input.dataset.cases
+    .filter((item) => item.reviewStatus === "changes_requested")
+    .map((item) => item.id)
+    .sort();
+  const unresolvedEvidenceLogReferences = input.dataset.cases
+    .filter((item) => !isResolvedEvidenceLogReference(item.evidenceLogReference))
+    .map((item) => item.id)
     .sort();
   const failedCaseIds = input.caseResults
     .filter((result) => !result.passed)
@@ -96,20 +193,39 @@ export function buildEvaluationReport(
       reasons: result.failedReasons,
     }))
     .sort((left, right) => left.caseId.localeCompare(right.caseId));
-  const reviewedCases = input.caseResults.filter(
-    (result) => result.humanReviewed,
+  const reviewedCases = input.dataset.cases.filter(
+    (item) => item.reviewStatus === "human_reviewed",
   ).length;
   const assessed =
-    reviewedCases === input.caseResults.length &&
+    integrityIssues.length === 0 &&
+    reviewedCases === input.dataset.cases.length &&
     unresolvedEvidenceLogReferences.length === 0;
   const finalStatus = determineFinalStatus(
     automatedStatus,
     missingHumanReviews,
     unresolvedEvidenceLogReferences,
+    false,
+    reviewChangesRequestedCaseIds,
   );
+  const approvalBlockers = [
+    ...integrityIssues.map((issue) => `Evaluation integrity: ${issue}`),
+    ...(automatedStatus === "PASS"
+      ? []
+      : [`Automated evaluation status is ${automatedStatus}.`]),
+    ...(missingHumanReviews.length === 0
+      ? []
+      : [`Human review is pending for ${missingHumanReviews.length} case(s).`]),
+    ...(reviewChangesRequestedCaseIds.length === 0
+      ? []
+      : [`Review changes are requested for ${reviewChangesRequestedCaseIds.length} case(s).`]),
+    ...(unresolvedEvidenceLogReferences.length === 0
+      ? []
+      : [`Evidence Log references are unresolved for ${unresolvedEvidenceLogReferences.length} case(s).`]),
+    "Fixture-mode results do not approve a live model release.",
+  ];
 
   return {
-    schemaVersion: "evaluation-report-v1.0.0",
+    schemaVersion: "evaluation-report-v1.1.0",
     evaluationMode: "fixture",
     candidateSource: FIXTURE_SOURCES[0],
     liveModelOutputs: false,
@@ -132,15 +248,19 @@ export function buildEvaluationReport(
     missingHumanReviews,
     unresolvedEvidenceLogReferences,
     thresholdChecks,
+    thresholdChecksBySplit: checksBySplit,
+    evaluationIntegrityIssues: integrityIssues,
+    reviewChangesRequestedCaseIds,
+    approvalBlockers,
     automatedStatus,
     status: finalStatus,
     approvalBlocked: finalStatus !== "PASS",
     humanReview: {
       assessed,
       reviewedCases,
-      totalCases: input.caseResults.length,
+      totalCases: input.dataset.cases.length,
       note:
-        "Human-review criteria are unassessed unless reviewedCases equals totalCases and every Evidence Log reference is resolved. No approvals or Evidence Log IDs are fabricated.",
+        "Review state is taken from the versioned dataset. Human-review criteria are assessed only when every case is marked human_reviewed and every Evidence Log reference has a valid ID format. No approvals or Evidence Log IDs are fabricated.",
       rubric: [
         "Evidence grounding: every factual claim is supported by the cited packet.",
         "Policy attribution: fictional demo rules are never presented as Groww policy.",
@@ -159,6 +279,7 @@ export function buildEvaluationReport(
       "Retrieval is deterministic lexical BM25 over the Phase 3 corpus and does not test production semantic retrieval.",
       "Financial facts are checked only where a candidate explicitly claims them.",
       "Human-review criteria remain unassessed until every golden case has a reviewer decision and Evidence Log reference.",
+      "Fixture-mode evaluation cannot approve a live model release; live-model evaluation and independent Evidence Log resolution are not implemented.",
     ],
   };
 }
@@ -273,6 +394,18 @@ export function renderMarkdownReport(report: EvaluationReport): string {
     );
   }
   lines.push("");
+  lines.push("## Threshold checks by split");
+  lines.push("");
+  lines.push("| Split | Passed | Failed checks |");
+  lines.push("| --- | --- | --- | ");
+  for (const split of GOLDEN_SPLITS) {
+    const checks = report.thresholdChecksBySplit[split];
+    const failed = checks.filter((check) => !check.passed).map((check) => check.id);
+    lines.push(
+      `| ${split} | ${checks.length - failed.length}/${checks.length} | ${failed.length === 0 ? "none" : failed.join(", ")} |`,
+    );
+  }
+  lines.push("");
   lines.push("## Failures and review gaps");
   lines.push("");
   lines.push(
@@ -287,6 +420,18 @@ export function renderMarkdownReport(report: EvaluationReport): string {
   lines.push(
     `- Unresolved Evidence Log references: ${report.unresolvedEvidenceLogReferences.length === 0 ? "none" : report.unresolvedEvidenceLogReferences.join(", ")}`,
   );
+  lines.push(
+    `- Review changes requested: ${report.reviewChangesRequestedCaseIds.length === 0 ? "none" : report.reviewChangesRequestedCaseIds.join(", ")}`,
+  );
+  lines.push(
+    `- Evaluation integrity issues: ${report.evaluationIntegrityIssues.length === 0 ? "none" : report.evaluationIntegrityIssues.join(" | ")}`,
+  );
+  lines.push("");
+  lines.push("## Approval blockers");
+  lines.push("");
+  for (const blocker of report.approvalBlockers) {
+    lines.push(`- ${blocker}`);
+  }
   lines.push(
     `- Human review assessed: ${report.humanReview.assessed ? "yes" : "no"} (${report.humanReview.reviewedCases}/${report.humanReview.totalCases} reviewed)`,
   );
@@ -320,8 +465,8 @@ export function writeEvaluationReport(
   const outputDirectory = join(process.cwd(), directory);
   mkdirSync(outputDirectory, { recursive: true });
 
-  const jsonPath = join(outputDirectory, "fixture-report.v1.json");
-  const markdownPath = join(outputDirectory, "fixture-report.v1.md");
+  const jsonPath = join(outputDirectory, "fixture-report.v1.1.json");
+  const markdownPath = join(outputDirectory, "fixture-report.v1.1.md");
 
   writeFileSync(jsonPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   writeFileSync(markdownPath, renderMarkdownReport(report), "utf8");

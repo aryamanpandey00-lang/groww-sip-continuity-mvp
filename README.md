@@ -197,10 +197,15 @@ resettable; the dashboard remains an independent static snapshot.
 - Embeddings, vector search or a relational database
 - Real Groww integration, real payment, SIP, reward or transaction functionality
 - Authentication, KYC or real investor data
-- Durable cross-instance session replay protection
-- Shared/global rate limiting (the API has only bounded per-instance demo limits)
+- Shared durable action state is not configured. Production action routes return
+  HTTP 503 until an atomic shared session store is wired in; local session guards
+  cannot survive a process restart or coordinate multiple instances.
+- Deployment-wide AI token budgeting is not configured. Production model calls
+  fail closed without an injected atomic shared budget coordinator; AI remains
+  disabled by default and process-local request limits are only local safeguards.
 - Human review of the 48 golden cases and resolution of their 48 Evidence Log references
 - Live-model quality evaluation
+- An Evidence Log registry to verify that referenced EVL records actually exist
 
 ## Setup
 
@@ -320,10 +325,11 @@ docs/
   golden-dataset.md
   evaluation-framework.md
   assistant-integration.md
+  phase8b-remediation.md
 reports/
   evaluation/
-    fixture-report.v1.json
-    fixture-report.v1.md
+    fixture-report.v1.1.json
+    fixture-report.v1.1.md
 test/
   dashboard-fixture.test.ts
   date-utils.test.ts

@@ -339,7 +339,7 @@ export interface ThresholdCheck {
 }
 
 export interface EvaluationReport {
-  schemaVersion: "evaluation-report-v1.0.0";
+  schemaVersion: "evaluation-report-v1.1.0";
   evaluationMode: "fixture";
   candidateSource: FixtureSource;
   liveModelOutputs: false;
@@ -361,6 +361,10 @@ export interface EvaluationReport {
   missingHumanReviews: string[];
   unresolvedEvidenceLogReferences: string[];
   thresholdChecks: ThresholdCheck[];
+  thresholdChecksBySplit: Record<GoldenSplit, ThresholdCheck[]>;
+  evaluationIntegrityIssues: string[];
+  reviewChangesRequestedCaseIds: string[];
+  approvalBlockers: string[];
   automatedStatus: "PASS" | "FAIL" | "BLOCKED";
   status: "PASS" | "FAIL" | "BLOCKED" | "NEEDS_REVIEW";
   approvalBlocked: boolean;

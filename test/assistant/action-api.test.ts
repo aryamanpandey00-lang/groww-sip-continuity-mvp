@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createAssistantRateLimiter } from "@/lib/ai/rate-limit";
 import {
   ACTION_SESSION_COOKIE_NAME,
+  createActionDemoSession,
   readSignedActionSession,
   signActionDemoSession,
 } from "@/lib/assistant/action-session";
@@ -20,12 +21,17 @@ import { demoPolicy } from "@/lib/domain/policy";
 
 const SECRET = "unit-test-only-action-session-secret-32-bytes";
 
-function createHarness(options: { secret?: string; now?: number; assistantEnabled?: string } = {}) {
+function createHarness(options: {
+  secret?: string;
+  now?: number;
+  assistantEnabled?: string;
+  nodeEnv?: string;
+} = {}) {
   let nowMs = options.now ?? Date.now();
   let requestNumber = 0;
   const handlers = createActionApiHandlers({
     env: {
-      NODE_ENV: "test",
+      NODE_ENV: options.nodeEnv ?? "test",
       ASSISTANT_ENABLED: options.assistantEnabled ?? "false",
       ACTION_SESSION_SIGNING_SECRET: options.secret ?? SECRET,
     },
@@ -82,6 +88,21 @@ async function confirm(
 }
 
 describe("simulated action API", () => {
+  it("fails closed in production until durable shared action state is available", async () => {
+    const harness = createHarness({ nodeEnv: "production" });
+
+    const response = await preview(
+      harness.handlers,
+      { type: "RETRY_PAYMENT" },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: { code: "SHARED_STATE_UNAVAILABLE" },
+    });
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
   it("creates an eligible deterministic retry preview without applying the action", async () => {
     const harness = createHarness();
     const response = await preview(harness.handlers, { type: "RETRY_PAYMENT" });
@@ -257,7 +278,7 @@ describe("simulated action API", () => {
     expect(result.stateSummary.rewardProgress.eligibleInstalments).toBe(11);
   });
 
-  it("rejects a stale state version before applying a preview", async () => {
+  it("rejects a rolled-back session token before applying a preview", async () => {
     const harness = createHarness();
     const response = await preview(harness.handlers, { type: "RETRY_PAYMENT" });
     const body = await response.json() as ActionPreviewResponse;
@@ -274,9 +295,31 @@ describe("simulated action API", () => {
       true,
       staleCookie,
     );
-    const result = await resultResponse.json() as ActionOperationResponse;
-    expect(result.status).toBe("STATE_CHANGED");
-    expect(result.stateSummary.rewardProgress.eligibleInstalments).toBe(11);
+    expect(resultResponse.status).toBe(401);
+    expect((await resultResponse.json()).error.code).toBe("INVALID_SESSION");
+  });
+
+  it("rejects a previously issued session cookie after a newer cookie is minted", async () => {
+    const harness = createHarness();
+    const olderSession = createActionDemoSession("BASE", harness.now());
+    const oldCookie = `${ACTION_SESSION_COOKIE_NAME}=${signActionDemoSession(olderSession, SECRET)}`;
+    const freshPreview = await preview(
+      harness.handlers,
+      { type: "RETRY_PAYMENT" },
+      "BASE",
+      oldCookie,
+    );
+    const freshCookie = cookieFrom(freshPreview);
+    const rollbackAttempt = await preview(
+      harness.handlers,
+      { type: "RETRY_PAYMENT" },
+      "BASE",
+      oldCookie,
+    );
+
+    expect(freshCookie).not.toBe(oldCookie);
+    expect(rollbackAttempt.status).toBe(401);
+    expect((await rollbackAttempt.json()).error.code).toBe("INVALID_SESSION");
   });
 
   it("requires explicit confirmation and cancellation leaves fictional state unchanged", async () => {

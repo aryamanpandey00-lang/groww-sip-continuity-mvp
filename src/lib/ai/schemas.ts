@@ -13,6 +13,7 @@ export const MAX_KEY_POINTS = 6;
 export const MAX_KEY_POINT_CHARS = 240;
 export const MAX_CITATIONS = 5;
 export const MAX_FOLLOW_UP_CHARS = 300;
+export const MAX_MODEL_OUTPUT_CHARS = 64_000;
 
 const ACTION_TYPE_ENUM = [...ASSISTANT_ACTION_TYPES];
 const INTENT_ENUM = [...ASSISTANT_INTENTS];
@@ -155,8 +156,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function isFiniteInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value);
+function isSafeIntegerInRange(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+  );
 }
 
 function parseAction(
@@ -215,8 +225,8 @@ function parseAction(
         return null;
       }
 
-      if (!isFiniteInteger(value.amount)) {
-        issues.push("MODIFY_AMOUNT requires an integer amount.");
+      if (!isSafeIntegerInRange(value.amount, 0, 1_000_000)) {
+        issues.push("MODIFY_AMOUNT requires a safe integer from 0 to 1000000.");
         return null;
       }
 
@@ -228,8 +238,8 @@ function parseAction(
         return null;
       }
 
-      if (!isFiniteInteger(value.debitDay)) {
-        issues.push("MODIFY_DEBIT_DAY requires an integer debitDay.");
+      if (!isSafeIntegerInRange(value.debitDay, 0, 31)) {
+        issues.push("MODIFY_DEBIT_DAY requires a safe integer from 0 to 31.");
         return null;
       }
 
@@ -260,6 +270,13 @@ export function parseAssistantModelOutput(
       return { success: false, issues: ["Model output is empty."] };
     }
 
+    if (text.length > MAX_MODEL_OUTPUT_CHARS) {
+      return {
+        success: false,
+        issues: [`Model output exceeds ${MAX_MODEL_OUTPUT_CHARS} characters.`],
+      };
+    }
+
     try {
       value = JSON.parse(text);
     } catch {
@@ -280,7 +297,7 @@ export function parseAssistantModelOutput(
   }
 
   for (const key of ASSISTANT_RESPONSE_SCHEMA_KEYS) {
-    if (!(key in value)) {
+    if (!Object.hasOwn(value, key)) {
       issues.push(`Missing required property: ${key}.`);
     }
   }

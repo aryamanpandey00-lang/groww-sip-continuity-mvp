@@ -89,13 +89,17 @@ describe("server-only OpenAI Responses API client", () => {
     expect(JSON.stringify(result)).not.toContain(READY_CONFIG.apiKey);
   });
 
-  it("treats an incomplete response as invalid output", async () => {
+  it("retains usage from an incomplete response for budget settlement", async () => {
     mocks.create.mockResolvedValue(response({ status: "incomplete" }));
     const client = createOpenAIModelClient(READY_CONFIG);
 
     const result = await client.respond({ instructions: "s", input: "u" });
 
-    expect(result).toEqual({ status: "INVALID_OUTPUT", errorCode: "incomplete" });
+    expect(result).toEqual({
+      status: "INVALID_OUTPUT",
+      errorCode: "incomplete",
+      usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+    });
   });
 
   it("treats an empty output as invalid output", async () => {
@@ -104,7 +108,24 @@ describe("server-only OpenAI Responses API client", () => {
 
     const result = await client.respond({ instructions: "s", input: "u" });
 
-    expect(result).toEqual({ status: "INVALID_OUTPUT", errorCode: "empty_output" });
+    expect(result).toEqual({
+      status: "INVALID_OUTPUT",
+      errorCode: "empty_output",
+      usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+    });
+  });
+
+  it("rejects non-completed statuses even when output text is present", async () => {
+    mocks.create.mockResolvedValue(response({ status: "in_progress" }));
+    const client = createOpenAIModelClient(READY_CONFIG);
+
+    const result = await client.respond({ instructions: "s", input: "u" });
+
+    expect(result).toEqual({
+      status: "UNAVAILABLE",
+      errorCode: "unexpected_response_status",
+      usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 },
+    });
   });
 
   it("maps SDK timeouts to a timeout result", async () => {
@@ -177,5 +198,19 @@ describe("server-only OpenAI Responses API client", () => {
     if (result.status === "OK") {
       expect(result.usage).toBeUndefined();
     }
+  });
+
+  it("derives total usage only from both reported components", async () => {
+    mocks.create.mockResolvedValue(response({
+      usage: { input_tokens: 9, output_tokens: 4 },
+    }));
+    const client = createOpenAIModelClient(READY_CONFIG);
+
+    const result = await client.respond({ instructions: "s", input: "u" });
+
+    expect(result).toMatchObject({
+      status: "OK",
+      usage: { inputTokens: 9, outputTokens: 4, totalTokens: 13 },
+    });
   });
 });

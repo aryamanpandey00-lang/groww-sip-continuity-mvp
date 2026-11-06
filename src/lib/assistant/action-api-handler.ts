@@ -16,8 +16,11 @@ import {
   createAssistantRateLimiter,
 } from "@/lib/ai/rate-limit";
 import {
+  isLatestActionSession,
   isActionPreviewConsumed,
   markActionPreviewConsumed,
+  registerLatestActionSession,
+  revokeActionSession,
 } from "./action-replay-guard";
 import type {
   ActionApiErrorCode,
@@ -30,6 +33,7 @@ import type {
 } from "./action-contracts";
 import {
   actionSessionSetCookie,
+  getSignedActionSessionToken,
   isSigningSecretReady,
   readSignedActionSession,
   signActionDemoSession,
@@ -164,6 +168,17 @@ async function prepareRequest(
     return {
       ok: false,
       response: error(requestId, "UNSUPPORTED_MEDIA_TYPE", "Send this request as application/json.", 415),
+    };
+  }
+  if (env.NODE_ENV === "production") {
+    return {
+      ok: false,
+      response: error(
+        requestId,
+        "SHARED_STATE_UNAVAILABLE",
+        "Simulated actions are unavailable until a shared atomic session store is configured.",
+        503,
+      ),
     };
   }
 
@@ -320,6 +335,21 @@ export function createActionApiHandlers(
           secret: prepared.context.secret,
           nowMs: prepared.context.nowMs,
         });
+        if (
+          !registerLatestActionSession(
+            result.session.sessionId,
+            result.token,
+            Date.parse(result.session.expiresAt),
+            prepared.context.nowMs,
+          )
+        ) {
+          return error(
+            requestId,
+            "SHARED_STATE_UNAVAILABLE",
+            "The local session guard is full. Reset the demo after the current session expires.",
+            503,
+          );
+        }
         const body: ActionPreviewResponse = {
           requestId,
           status: result.status,
@@ -363,6 +393,19 @@ export function createActionApiHandlers(
         if (isActionPreviewConsumed(prepared.value.previewId, prepared.context.nowMs)) {
           return previewNotFoundResponse(requestId, session);
         }
+        const sessionToken = getSignedActionSessionToken(
+          request.headers.get("cookie"),
+        );
+        if (
+          sessionToken === null ||
+          !isLatestActionSession(
+            session.sessionId,
+            sessionToken,
+            prepared.context.nowMs,
+          )
+        ) {
+          return sessionError(requestId, "INVALID");
+        }
         if (confirmLocks.has(session.sessionId)) {
           return error(requestId, "CONFIRMATION_IN_PROGRESS", "A confirmation is already being processed.", 409);
         }
@@ -385,6 +428,21 @@ export function createActionApiHandlers(
             return previewNotFoundResponse(requestId, session);
           }
           const token = signActionDemoSession(result.session, prepared.context.secret);
+          if (
+            !registerLatestActionSession(
+              result.session.sessionId,
+              token,
+              Date.parse(result.session.expiresAt),
+              prepared.context.nowMs,
+            )
+          ) {
+            return error(
+              requestId,
+              "SHARED_STATE_UNAVAILABLE",
+              "The local session guard is full. Reset the demo after the current session expires.",
+              503,
+            );
+          }
           const response = json(
             requestId,
             toOperationResponse(result.response, requestId),
@@ -421,9 +479,39 @@ export function createActionApiHandlers(
             prepared.context.nowMs,
           );
         }
+        if (
+          previous.status === "VALID" &&
+          !revokeActionSession(
+            previous.session.sessionId,
+            Date.parse(previous.session.expiresAt),
+            prepared.context.nowMs,
+          )
+        ) {
+          return error(
+            requestId,
+            "SHARED_STATE_UNAVAILABLE",
+            "The local session guard is full. Reset the demo after the current session expires.",
+            503,
+          );
+        }
         const scenario = prepared.value.scenario ?? "BASE";
         const session = resetActionSession(scenario, prepared.context.nowMs);
         const token = signActionDemoSession(session, prepared.context.secret);
+        if (
+          !registerLatestActionSession(
+            session.sessionId,
+            token,
+            Date.parse(session.expiresAt),
+            prepared.context.nowMs,
+          )
+        ) {
+          return error(
+            requestId,
+            "SHARED_STATE_UNAVAILABLE",
+            "The local session guard is full. Reset the demo after the current session expires.",
+            503,
+          );
+        }
         const body: ActionOperationResponse = {
           requestId,
           status: "RESET",

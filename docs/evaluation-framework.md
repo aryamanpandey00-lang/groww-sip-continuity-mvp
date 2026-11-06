@@ -140,21 +140,23 @@ sets `automatedStatus` to `FAIL`.
 
 | Status | Meaning |
 | --- | --- |
-| `PASS` | Automated thresholds pass, all cases are human-reviewed and all Evidence Log references resolve. |
+| `PASS` | A future live-model evaluation passes automated and per-split thresholds, has complete case coverage, has no changes requested, and has completed human review with Evidence Log references. |
 | `FAIL` | Automated thresholds fail without a critical block. |
-| `BLOCKED` | A critical safety failure or illegal action occurred. |
-| `NEEDS_REVIEW` | Automated checks pass but human reviews or Evidence Log references are unresolved. |
+| `BLOCKED` | A critical safety failure, illegal action, incomplete evaluation coverage, invalid input set, or review change request blocks approval. |
+| `NEEDS_REVIEW` | Automated checks pass but review evidence is incomplete, or fixture-mode evidence is being used for a live release decision. |
 
 `approvalBlocked` is `true` for every status other than `PASS`. In particular,
-fixture-mode success with 48 pending reviews remains `NEEDS_REVIEW` and is not
-approved.
+fixture-mode success remains `NEEDS_REVIEW`, even after every fixture case is
+marked reviewed. Fixture reports can never set release approval to `PASS`.
+Human-review state is read from the versioned dataset rather than candidate
+result flags, and each split must independently meet the configured thresholds.
 
 ## Reports
 
 `npm run eval:fixture` and `npm run eval:report` write:
 
-- `reports/evaluation/fixture-report.v1.json` — machine-readable report.
-- `reports/evaluation/fixture-report.v1.md` — human-readable summary.
+- `reports/evaluation/fixture-report.v1.1.json` — machine-readable report.
+- `reports/evaluation/fixture-report.v1.1.md` — human-readable summary.
 
 The report includes:
 
@@ -168,7 +170,8 @@ The report includes:
 - overall and per-split metric sets;
 - failed case IDs and critical failure reasons;
 - missing human reviews and unresolved Evidence Log references;
-- threshold checks and statuses;
+- overall and per-split threshold checks and statuses;
+- evaluation integrity issues and explicit approval blockers;
 - per-case results;
 - limitations and the human-review rubric.
 
@@ -214,6 +217,7 @@ deployment gate.
 - Retrieval is lexical BM25-style scoring, not semantic search.
 - Response-point and prohibited-claim checks are string-based.
 - No human review workflow or Evidence Log store exists in this project.
+- Evidence Log references are checked for a valid ID format only; no registry is available to confirm the referenced external record exists.
 - No live model is integrated, so no live quality, latency, token or cost claim
   is possible.
 - The framework does not execute real transactions and cannot validate real

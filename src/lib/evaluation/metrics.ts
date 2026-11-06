@@ -195,12 +195,19 @@ export function determineFinalStatus(
   automatedStatus: "PASS" | "FAIL" | "BLOCKED",
   missingHumanReviews: string[],
   unresolvedEvidenceLogReferences: string[],
+  liveModelEvaluation = false,
+  reviewChangesRequestedCaseIds: string[] = [],
 ): "PASS" | "FAIL" | "BLOCKED" | "NEEDS_REVIEW" {
   if (automatedStatus !== "PASS") {
     return automatedStatus;
   }
 
+  if (reviewChangesRequestedCaseIds.length > 0) {
+    return "BLOCKED";
+  }
+
   if (
+    !liveModelEvaluation ||
     missingHumanReviews.length > 0 ||
     unresolvedEvidenceLogReferences.length > 0
   ) {

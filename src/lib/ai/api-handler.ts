@@ -13,6 +13,7 @@ import {
 } from "./api-validation";
 import { toAssistantApiResponse } from "./public-response";
 import { actionSessionSetCookie, isSigningSecretReady } from "@/lib/assistant/action-session";
+import { registerLatestActionSession } from "@/lib/assistant/action-replay-guard";
 import {
   assistantStateFromSignedSession,
   createAiApprovedActionPreview,
@@ -21,7 +22,11 @@ import {
   assistantRateLimiter,
   createAssistantRateLimiter,
 } from "./rate-limit";
-import type { AssistantDependencies, AssistantRequest } from "./types";
+import type {
+  AssistantDependencies,
+  AssistantRequest,
+  AssistantTokenBudgetCoordinator,
+} from "./types";
 
 type AssistantRunner = typeof runAssistant;
 type AssistantRateLimiter = ReturnType<typeof createAssistantRateLimiter>;
@@ -32,6 +37,7 @@ export interface AssistantApiHandlerDependencies {
   requestIdFactory?: () => string;
   now?: () => number;
   env?: Record<string, string | undefined>;
+  budgetCoordinator?: AssistantTokenBudgetCoordinator;
 }
 
 function responseHeaders(): Headers {
@@ -165,12 +171,16 @@ export function createAssistantApiHandler(
       if (dependencies.env) {
         assistantDependencies.env = dependencies.env;
       }
+      if (dependencies.budgetCoordinator) {
+        assistantDependencies.budgetCoordinator = dependencies.budgetCoordinator;
+      }
 
       const result = await runner(assistantRequest, assistantDependencies);
       let actionPreview = null;
       let actionSessionCookie: string | null = null;
       if (
         result.status === "APPROVED" &&
+        environment.NODE_ENV !== "production" &&
         result.gateResult?.passed === true &&
         result.fallbackUsed === false &&
         result.refusal === false &&
@@ -185,7 +195,15 @@ export function createAssistantApiHandler(
           secret: environment.ACTION_SESSION_SIGNING_SECRET,
           nowMs: now(),
         });
-        if (proposed) {
+        if (
+          proposed &&
+          registerLatestActionSession(
+            proposed.session.sessionId,
+            proposed.token,
+            Date.parse(proposed.session.expiresAt),
+            now(),
+          )
+        ) {
           actionPreview = proposed.preview;
           actionSessionCookie = actionSessionSetCookie(
             proposed.token,

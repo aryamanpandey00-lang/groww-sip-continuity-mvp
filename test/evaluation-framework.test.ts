@@ -425,28 +425,54 @@ describe("fixture validation and evaluation gates", () => {
     expect(report.status).toBe("NEEDS_REVIEW");
     expect(report.approvalBlocked).toBe(true);
 
-    expect(determineFinalStatus("PASS", [], [])).toBe("PASS");
+    expect(determineFinalStatus("PASS", [], [])).toBe("NEEDS_REVIEW");
     expect(determineFinalStatus("PASS", ["case"], [])).toBe("NEEDS_REVIEW");
     expect(determineFinalStatus("PASS", [], ["case"])).toBe("NEEDS_REVIEW");
+    expect(determineFinalStatus("PASS", [], [], true)).toBe("PASS");
+    expect(determineFinalStatus("PASS", [], [], true, ["case"])).toBe("BLOCKED");
     expect(determineFinalStatus("FAIL", [], [])).toBe("FAIL");
     expect(determineFinalStatus("BLOCKED", [], [])).toBe("BLOCKED");
 
     // In-memory gate exercise only. No reviewed case or EVL ID is persisted.
-    const reviewedResults = caseResults.map((result) => ({
+    const forgedReviewFlags = caseResults.map((result) => ({
       ...result,
       humanReviewed: true,
       evidenceLogResolved: true,
     }));
-    const reviewedReport = buildEvaluationReport({
+    const forgedReport = buildEvaluationReport({
       dataset,
       fixtures: fixtureSet,
-      caseResults: reviewedResults,
+      caseResults: forgedReviewFlags,
       generatedAt: FIXED_TIME,
     });
 
-    expect(reviewedReport.status).toBe("PASS");
-    expect(reviewedReport.approvalBlocked).toBe(false);
-    expect(reviewedReport.humanReview.assessed).toBe(true);
+    expect(forgedReport.missingHumanReviews).toHaveLength(48);
+    expect(forgedReport.unresolvedEvidenceLogReferences).toHaveLength(48);
+    expect(forgedReport.status).toBe("NEEDS_REVIEW");
+    expect(forgedReport.approvalBlocked).toBe(true);
+    expect(forgedReport.humanReview.assessed).toBe(false);
+
+    const reviewedDataset = {
+      ...dataset,
+      cases: dataset.cases.map((item) => ({
+        ...item,
+        reviewStatus: "human_reviewed" as const,
+        evidenceLogReference: "EVL-2026-000001",
+      })),
+    };
+    const reviewedFixtureReport = buildEvaluationReport({
+      dataset: reviewedDataset,
+      fixtures: fixtureSet,
+      caseResults: forgedReviewFlags,
+      generatedAt: FIXED_TIME,
+    });
+
+    expect(reviewedFixtureReport.humanReview.assessed).toBe(true);
+    expect(reviewedFixtureReport.status).toBe("NEEDS_REVIEW");
+    expect(reviewedFixtureReport.approvalBlocked).toBe(true);
+    expect(reviewedFixtureReport.approvalBlockers).toContain(
+      "Fixture-mode results do not approve a live model release.",
+    );
   });
 
   it("15. applies configurable thresholds and blocks critical failures", () => {
@@ -493,6 +519,49 @@ describe("fixture validation and evaluation gates", () => {
     ).toBe("BLOCKED");
   });
 
+  it("blocks approval when any evaluation split misses its thresholds", () => {
+    const baseResults = evaluateFixtureCases(dataset.cases, fixtureSet.responses);
+    const adversarial = baseResults.find((result) => result.split === "adversarial");
+    if (!adversarial) throw new Error("Expected adversarial evaluation cases.");
+    const splitFailure = {
+      ...adversarial,
+      passed: false,
+      intentCorrect: false,
+      failedReasons: [...adversarial.failedReasons, "forced split-only intent miss"],
+    };
+    const report = buildEvaluationReport({
+      dataset,
+      fixtures: fixtureSet,
+      caseResults: replaceResult(baseResults, splitFailure),
+      generatedAt: FIXED_TIME,
+    });
+
+    expect(report.metrics.overall.intentAccuracy).toBeGreaterThan(0.9);
+    expect(report.metrics.bySplit.adversarial.intentAccuracy).toBeLessThan(0.9);
+    expect(
+      report.thresholdChecksBySplit.adversarial.find(
+        (check) => check.id === "intentAccuracy",
+      )?.passed,
+    ).toBe(false);
+    expect(report.automatedStatus).toBe("FAIL");
+  });
+
+  it("blocks report approval when evaluation case coverage is incomplete", () => {
+    const baseResults = evaluateFixtureCases(dataset.cases, fixtureSet.responses);
+    const report = buildEvaluationReport({
+      dataset,
+      fixtures: fixtureSet,
+      caseResults: baseResults.slice(1),
+      generatedAt: FIXED_TIME,
+    });
+
+    expect(report.automatedStatus).toBe("BLOCKED");
+    expect(report.evaluationIntegrityIssues.join(" ")).toContain(
+      "Evaluation results is missing case IDs",
+    );
+    expect(report.approvalBlocked).toBe(true);
+  });
+
   it("16. summarizes empty result sets without dividing by zero", () => {
     const metrics = summarizeCaseResults([]);
 
@@ -518,10 +587,10 @@ describe("fixture validation and evaluation gates", () => {
       const writtenMarkdown = readFileSync(paths.markdownPath, "utf8");
 
       expect(paths.jsonPath).toBe(
-        join(tempDirectory, "fixture-report.v1.json"),
+        join(tempDirectory, "fixture-report.v1.1.json"),
       );
       expect(paths.markdownPath).toBe(
-        join(tempDirectory, "fixture-report.v1.md"),
+        join(tempDirectory, "fixture-report.v1.1.md"),
       );
       expect(writtenJson).toEqual(report);
       expect(writtenMarkdown).toBe(renderMarkdownReport(report));
@@ -540,7 +609,7 @@ describe("fixture validation and evaluation gates", () => {
     expect(report.datasetHash).toMatch(/^[a-f0-9]{64}$/);
     expect(report.fixtureHash).toMatch(/^[a-f0-9]{64}$/);
     expect(report.corpusVersion).toBe("evidence-corpus-v1.0.0");
-    expect(report.schemaVersion).toBe("evaluation-report-v1.0.0");
+    expect(report.schemaVersion).toBe("evaluation-report-v1.1.0");
     expect(report.thresholdChecks.map((check) => check.id)).toContain(
       "citationValidity",
     );
@@ -564,6 +633,8 @@ describe("fixture validation and evaluation gates", () => {
     expect(markdown).toContain("Dataset SHA-256");
     expect(markdown).toContain("Human-review rubric");
     expect(markdown).toContain("Unresolved Evidence Log references");
+    expect(markdown).toContain("Approval blockers");
+    expect(markdown).toContain("Threshold checks by split");
     expect(markdown).toContain("NEEDS_REVIEW");
   });
 });

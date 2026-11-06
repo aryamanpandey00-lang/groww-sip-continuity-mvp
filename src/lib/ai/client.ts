@@ -11,6 +11,7 @@ import {
   ASSISTANT_RESPONSE_FORMAT_NAME,
   ASSISTANT_RESPONSE_JSON_SCHEMA,
 } from "./schemas";
+import { normalizeAssistantTokenUsage } from "./token-budget";
 
 function errorStatus(error: unknown): number | null {
   if (
@@ -77,12 +78,6 @@ function classifySdkError(error: unknown): AssistantModelCallResult {
   return { status: "UNAVAILABLE", errorCode: "sdk_error" };
 }
 
-function safeTokenCount(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : undefined;
-}
-
 /**
  * Server-only Responses API adapter. The API key is held only by the SDK
  * instance; it is never returned, logged, or included in request/result
@@ -122,33 +117,49 @@ export function createOpenAIModelClient(
           },
         );
 
+        const usage = normalizeAssistantTokenUsage(response.usage);
+
         if (response.status === "incomplete") {
-          return { status: "INVALID_OUTPUT", errorCode: "incomplete" };
+          return {
+            status: "INVALID_OUTPUT",
+            errorCode: "incomplete",
+            usage: usage.usage ?? undefined,
+          };
         }
 
         if (response.error) {
-          return { status: "UNAVAILABLE", errorCode: "response_error" };
+          return {
+            status: "UNAVAILABLE",
+            errorCode: "response_error",
+            usage: usage.usage ?? undefined,
+          };
         }
 
-        const outputText = response.output_text?.trim();
+        if (response.status !== "completed") {
+          return {
+            status: "UNAVAILABLE",
+            errorCode: "unexpected_response_status",
+            usage: usage.usage ?? undefined,
+          };
+        }
+
+        const rawOutputText: unknown = response.output_text;
+        const outputText =
+          typeof rawOutputText === "string" ? rawOutputText.trim() : "";
 
         if (!outputText) {
-          return { status: "INVALID_OUTPUT", errorCode: "empty_output" };
+          return {
+            status: "INVALID_OUTPUT",
+            errorCode: "empty_output",
+            usage: usage.usage ?? undefined,
+          };
         }
-
-        const usage = response.usage;
 
         return {
           status: "OK",
           outputText,
           modelId: response.model || undefined,
-          usage: usage
-            ? {
-                inputTokens: safeTokenCount(usage.input_tokens),
-                outputTokens: safeTokenCount(usage.output_tokens),
-                totalTokens: safeTokenCount(usage.total_tokens),
-              }
-            : undefined,
+          usage: usage.usage ?? undefined,
         };
       } catch (error) {
         return classifySdkError(error);

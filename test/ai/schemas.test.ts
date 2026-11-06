@@ -84,6 +84,34 @@ describe("structured output schema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects action values outside the strict JSON Schema bounds", () => {
+    const fractionalAmount = parseAssistantModelOutput({
+      ...validPaymentOutput(),
+      proposedAction: { type: "MODIFY_AMOUNT", amount: 500.5 },
+    });
+    const unsafeAmount = parseAssistantModelOutput({
+      ...validPaymentOutput(),
+      proposedAction: { type: "MODIFY_AMOUNT", amount: Number.MAX_SAFE_INTEGER + 1 },
+    });
+    const invalidDebitDay = parseAssistantModelOutput({
+      ...validPaymentOutput(),
+      proposedAction: { type: "MODIFY_DEBIT_DAY", debitDay: 32 },
+    });
+
+    expect(fractionalAmount.success).toBe(false);
+    expect(unsafeAmount.success).toBe(false);
+    expect(invalidDebitDay.success).toBe(false);
+  });
+
+  it("rejects oversized raw model output before JSON parsing", () => {
+    const result = parseAssistantModelOutput("x".repeat(64_001));
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.issues.join(" ")).toContain("exceeds 64000 characters");
+    }
+  });
+
   it("allows an empty follow-up question and rejects overlong text", () => {
     const emptyFollowUp = parseAssistantModelOutput({
       ...validPaymentOutput(),

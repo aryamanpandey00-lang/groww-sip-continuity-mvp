@@ -234,6 +234,43 @@ describe("POST /api/assistant", () => {
     expect(JSON.stringify(body)).not.toContain("cycle_2026_11");
   });
 
+  it("does not mint signed action previews in production without shared session storage", async () => {
+    const handler = createAssistantApiHandler({
+      runAssistant: async () => result({
+        status: "APPROVED",
+        directAnswer: "The demo retry is eligible for a simulated preview.",
+        qualityLabel: "Evidence-backed",
+        fallbackUsed: false,
+        fallbackReason: "NONE",
+        proposedAction: { type: "RETRY_PAYMENT", cycleId: "cycle_2026_11" },
+        gateResult: {
+          passed: true,
+          criticalFailures: [],
+          checkedAt: fixedDate().toISOString(),
+          qualityLabel: "Evidence-backed",
+        },
+      }),
+      env: {
+        NODE_ENV: "production",
+        ACTION_SESSION_SIGNING_SECRET: ACTION_SESSION_SECRET,
+      },
+      now: () => fixedDate().getTime(),
+      requestIdFactory: () => "req_ai_action_prod",
+      rateLimiter: createAssistantRateLimiter(),
+    });
+
+    const response = await handler(makeRequest(JSON.stringify({
+      question: PAYMENT_QUESTION,
+      selectedCategory: "PAYMENT_FAILED",
+      demoScenario: "BASE",
+    })));
+    const body = await json(response);
+
+    expect(body.status).toBe("APPROVED");
+    expect(body.actionPreview).toBeNull();
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
   it("invalidates a practice preview when an approved AI preview replaces its scenario", async () => {
     const actions = createActionApiHandlers({
       env: {
