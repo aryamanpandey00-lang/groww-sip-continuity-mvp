@@ -11,6 +11,7 @@ import {
 import {
   hasRequestedAmountValue,
   hasRequestedDebitDayValue,
+  isInformationalModificationQuestion,
 } from "./missing-info";
 import type {
   AssistantActionType,
@@ -297,6 +298,10 @@ function allowedActionTypes(
   }
 
   if (intent === "MODIFY_SIP") {
+    if (isInformationalModificationQuestion(question)) {
+      return [...actions];
+    }
+
     if (hasRequestedAmountValue(question)) {
       actions.add("MODIFY_AMOUNT");
     }

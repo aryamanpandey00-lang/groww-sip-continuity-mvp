@@ -15,6 +15,26 @@ const NONE: MissingInformationDecision = {
   code: "NONE",
 };
 
+const INFORMATIONAL_MODIFICATION_PATTERNS = [
+  /\b(?:what|which|how)\b[\s\S]{0,100}\b(?:rules?|range|process|works?|options?)\b/i,
+  /\b(?:explain|describe)\b[\s\S]{0,100}\b(?:change|modify|amount|debit day)\b/i,
+];
+
+const EXPLICIT_MODIFICATION_ACTION_PATTERNS = [
+  /(?:^|[.!?;]|\b(?:and|then|also|now)\b)\s*(?:please\s+)?(?:change|modify|edit|update|increase|decrease|reduce|raise|lower|set)\b/i,
+  /\b(?:i want|i would like|i'd like|can you|could you)\b[\s\S]{0,60}\b(?:change|modify|edit|update|increase|decrease|reduce|raise|lower|set)\b/i,
+];
+
+/** Informational rule questions need no action parameters and should be answerable from demo-policy evidence. */
+export function isInformationalModificationQuestion(question: string): boolean {
+  const trimmed = question.trim();
+  if (EXPLICIT_MODIFICATION_ACTION_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return false;
+  }
+
+  return INFORMATIONAL_MODIFICATION_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
 function hasCurrencyOrAmount(question: string): boolean {
   return (
     /(?:₹|rs\.?|inr)\s*[\d,]+/i.test(question) ||
@@ -88,7 +108,10 @@ export function detectMissingInformation(
     };
   }
 
-  if (intent !== "MODIFY_SIP") {
+  if (
+    intent !== "MODIFY_SIP" ||
+    isInformationalModificationQuestion(trimmed)
+  ) {
     return NONE;
   }
 

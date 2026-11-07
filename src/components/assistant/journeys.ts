@@ -60,7 +60,8 @@ export const ASSISTANT_JOURNEYS: AssistantJourney[] = [
     id: "MODIFY_SIP",
     title: "Modify SIP amount or debit date",
     description: "Ask about changing the amount or the debit day.",
-    starterQuestion: "I want to change my SIP monthly amount.",
+    starterQuestion:
+      "What fictional demo rules apply to changing my SIP monthly amount or debit day?",
     demoScenario: "BASE",
     scenarioNote: "BASE demo account",
     icon: SlidersIcon,

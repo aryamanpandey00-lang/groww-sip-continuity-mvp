@@ -3,7 +3,10 @@ import {
   classifyIntent,
   evidenceIntentForAssistantIntent,
 } from "@/lib/ai/intent";
-import { detectMissingInformation } from "@/lib/ai/missing-info";
+import {
+  detectMissingInformation,
+  isInformationalModificationQuestion,
+} from "@/lib/ai/missing-info";
 
 describe("deterministic intent classification", () => {
   it.each([
@@ -78,6 +81,39 @@ describe("deterministic missing-information checks", () => {
     expect(decision.required).toBe(true);
     expect(decision.code).toBe("MODIFY_AMOUNT");
     expect(decision.question).toMatch(/monthly SIP amount/i);
+  });
+
+  it("answers informational modification-rule questions without requesting an action value", () => {
+    const question =
+      "What fictional demo rules apply to changing my SIP monthly amount or debit day?";
+
+    expect(isInformationalModificationQuestion(question)).toBe(true);
+    expect(detectMissingInformation(question, "MODIFY_SIP")).toMatchObject({
+      required: false,
+      code: "NONE",
+      question: null,
+    });
+
+    expect(
+      detectMissingInformation("I want to change my SIP monthly amount", "MODIFY_SIP")
+        .required,
+    ).toBe(true);
+  });
+
+  it("treats mixed informational and modification requests as actions", () => {
+    const missingValue = "Explain the rules and change my SIP amount";
+    const specifiedValue = "Explain the rules and change my SIP amount to ₹5,000";
+
+    expect(isInformationalModificationQuestion(missingValue)).toBe(false);
+    expect(detectMissingInformation(missingValue, "MODIFY_SIP")).toMatchObject({
+      required: true,
+      code: "MODIFY_AMOUNT",
+    });
+
+    expect(isInformationalModificationQuestion(specifiedValue)).toBe(false);
+    expect(
+      detectMissingInformation(specifiedValue, "MODIFY_SIP").required,
+    ).toBe(false);
   });
 
   it("asks for a missing debit day", () => {

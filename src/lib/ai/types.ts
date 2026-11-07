@@ -210,6 +210,8 @@ export type AssistantProviderErrorType =
   | "rate_limit_error"
   | "server_error";
 
+export type AssistantProviderErrorCode = "json_validate_failed";
+
 export type AssistantProviderRequestParameter =
   | "model"
   | "messages"
@@ -295,6 +297,7 @@ export interface AssistantProviderDiagnostic {
   transportCause?: AssistantTransportCause;
   networkFamily?: AssistantNetworkFamily;
   providerErrorType?: AssistantProviderErrorType;
+  providerErrorCode?: AssistantProviderErrorCode;
   requestParameter?: AssistantProviderRequestParameter;
   schemaKeyword?: AssistantSchemaKeyword;
   validationDiagnostics?: AssistantValidationDiagnostic[];

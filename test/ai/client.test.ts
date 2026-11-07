@@ -500,6 +500,36 @@ describe("server-only Groq Chat Completions client", () => {
     expect(JSON.stringify(result)).not.toContain("private schema rejection detail");
   });
 
+  it("reports only the allowlisted Groq JSON validation error code", async () => {
+    const error = Object.assign(
+      new Error("json_validate_failed; private prompt and evidence must stay hidden"),
+      {
+        status: 400,
+        code: "json_validate_failed",
+        type: "invalid_request_error",
+        requestID: "req_json_validation_123",
+      },
+    );
+    mocks.create.mockRejectedValue(error);
+    const client = createGroqModelClient(READY_CONFIG);
+
+    const result = await client.respond({ instructions: "s", input: "u" });
+
+    expect(result).toMatchObject({
+      status: "UNAVAILABLE",
+      errorCode: "invalid_request",
+      providerDiagnostic: {
+        httpStatus: 400,
+        errorCategory: "invalid_request",
+        requestId: "req_json_validation_123",
+        providerErrorType: "invalid_request_error",
+        providerErrorCode: "json_validate_failed",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private prompt");
+    expect(JSON.stringify(result)).not.toContain("private evidence");
+  });
+
   it("reports only an allowlisted schema keyword from a provider validation message", async () => {
     const error = Object.assign(
       new Error("Invalid response schema: unsupported keyword maxItems; private prompt text"),

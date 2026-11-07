@@ -7,6 +7,7 @@ import type {
   AssistantModelClient,
   AssistantModelRequest,
   AssistantNetworkFamily,
+  AssistantProviderErrorCode,
   AssistantProviderErrorType,
   AssistantProviderDiagnostic,
   AssistantProviderRequestParameter,
@@ -87,6 +88,32 @@ function safeProviderErrorType(
   ];
   const type = errorType(error);
   return allowedTypes.find((allowed) => allowed === type);
+}
+
+function safeProviderErrorCode(
+  error: unknown,
+): AssistantProviderErrorCode | undefined {
+  const allowedCodes: readonly AssistantProviderErrorCode[] = [
+    "json_validate_failed",
+  ];
+  const record = recordOf(error);
+  const nestedError = recordOf(record?.error);
+  const code = (
+    typeof record?.code === "string"
+      ? record.code
+      : typeof nestedError?.code === "string"
+        ? nestedError.code
+        : ""
+  ).toLowerCase();
+  const directMatch = allowedCodes.find((allowed) => allowed === code);
+  if (directMatch) return directMatch;
+
+  const message = error instanceof Error ? error.message : "";
+  return allowedCodes.find((allowed) =>
+    new RegExp(`(?:^|[^A-Za-z0-9_])${allowed}(?:$|[^A-Za-z0-9_])`, "i").test(
+      message,
+    ),
+  );
 }
 
 const SAFE_REQUEST_PARAMETERS: readonly AssistantProviderRequestParameter[] = [
@@ -425,11 +452,13 @@ function classifySdkError(error: unknown): AssistantModelCallResult {
     ? "schema_error"
     : baseCategory;
   const providerErrorType = safeProviderErrorType(error);
+  const providerErrorCode = safeProviderErrorCode(error);
   const providerDiagnostic: AssistantProviderDiagnostic = {
     httpStatus: status,
     errorCategory: category,
     requestId: safeRequestId(error),
     ...(providerErrorType ? { providerErrorType } : {}),
+    ...(providerErrorCode ? { providerErrorCode } : {}),
     ...(requestParameter ? { requestParameter } : {}),
     ...(schemaKeyword ? { schemaKeyword } : {}),
     ...(sdkErrorKind.connected || sdkErrorKind.timedOut
