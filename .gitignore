@@ -23,6 +23,9 @@
 # misc
 .DS_Store
 *.pem
+/groww-sip-continuity-phase8b.zip
+/groww-sip-continuity-phase8c-local.zip
+/phase8a-*.txt
 
 # debug
 npm-debug.log*

@@ -4,6 +4,8 @@ import {
   type AssistantIntent,
   type AssistantModelOutput,
   type AssistantProposedAction,
+  type AssistantValidationDiagnostic,
+  type AssistantValidationFieldPath,
 } from "./types";
 
 export const ASSISTANT_RESPONSE_FORMAT_NAME = "groww_sip_assistant_response_v1";
@@ -35,9 +37,9 @@ function actionVariant(
 }
 
 /**
- * Strict JSON Schema passed to the Responses API via `text.format`.
+ * Strict JSON Schema passed to Groq Chat Completions via `response_format`.
  *
- * Keep this schema within OpenAI's supported Structured Outputs subset:
+ * Keep this schema within Groq's strict Structured Outputs subset:
  * no root-level anyOf, no nulls, all object properties required, and
  * `additionalProperties: false` on every object.
  */
@@ -66,7 +68,6 @@ export const ASSISTANT_RESPONSE_JSON_SCHEMA: Record<string, unknown> = {
     },
     keyPoints: {
       type: "array",
-      maxItems: MAX_KEY_POINTS,
       items: {
         type: "string",
         description:
@@ -75,7 +76,6 @@ export const ASSISTANT_RESPONSE_JSON_SCHEMA: Record<string, unknown> = {
     },
     citedEvidenceIds: {
       type: "array",
-      maxItems: MAX_CITATIONS,
       items: {
         type: "string",
         description:
@@ -142,11 +142,161 @@ const INTENT_SET = new Set<string>(INTENT_ENUM);
 
 export interface ModelOutputParseFailure {
   issues: string[];
+  validationDiagnostics: AssistantValidationDiagnostic[];
 }
 
 export type ModelOutputParseResult =
   | { success: true; output: AssistantModelOutput }
-  | { success: false; issues: string[] };
+  | ModelOutputParseFailure & { success: false };
+
+const SAFE_MODEL_OUTPUT_FIELDS: readonly AssistantValidationFieldPath[] = [
+  "intent",
+  "directAnswer",
+  "keyPoints",
+  "citedEvidenceIds",
+  "proposedAction",
+  "proposedAction.type",
+  "proposedAction.cycleId",
+  "proposedAction.amount",
+  "proposedAction.debitDay",
+  "followUpQuestion",
+  "refusal",
+];
+
+function safeModelOutputFieldPath(value: string): AssistantValidationFieldPath {
+  return SAFE_MODEL_OUTPUT_FIELDS.find((field) => field === value) ?? "unknown";
+}
+
+function validationDiagnosticForIssue(
+  issue: string,
+): AssistantValidationDiagnostic {
+  if (issue === "Model output is empty.") {
+    return { category: "empty_output", fieldPath: "$" };
+  }
+  if (issue === "Model output is not valid JSON.") {
+    return { category: "invalid_json", fieldPath: "$" };
+  }
+  if (issue === "Model output must be a JSON object.") {
+    return { category: "invalid_root_type", fieldPath: "$" };
+  }
+  if (issue.startsWith("Model output exceeds ")) {
+    return { category: "output_too_large", fieldPath: "$" };
+  }
+
+  const missingField = /^Missing required property: ([A-Za-z]+)\.$/.exec(issue);
+  if (missingField) {
+    return {
+      category: "missing_field",
+      fieldPath: safeModelOutputFieldPath(missingField[1] ?? ""),
+    };
+  }
+  if (issue.startsWith("Unexpected property: ")) {
+    return { category: "unexpected_field", fieldPath: "unknown" };
+  }
+
+  if (issue.startsWith("intent must be one of")) {
+    return { category: "invalid_enum", fieldPath: "intent" };
+  }
+  if (issue.startsWith("directAnswer must be")) {
+    return { category: "invalid_value", fieldPath: "directAnswer" };
+  }
+  if (issue === "keyPoints must be an array.") {
+    return { category: "invalid_type", fieldPath: "keyPoints" };
+  }
+  if (issue.startsWith("keyPoints must contain at most ")) {
+    return { category: "item_limit_exceeded", fieldPath: "keyPoints" };
+  }
+  if (issue === "Every key point must be a string.") {
+    return { category: "invalid_type", fieldPath: "keyPoints" };
+  }
+  if (issue.startsWith("Every key point must contain ")) {
+    return { category: "invalid_value", fieldPath: "keyPoints" };
+  }
+  if (issue === "citedEvidenceIds must be an array.") {
+    return { category: "invalid_type", fieldPath: "citedEvidenceIds" };
+  }
+  if (issue.startsWith("citedEvidenceIds must contain at most ")) {
+    return { category: "item_limit_exceeded", fieldPath: "citedEvidenceIds" };
+  }
+  if (issue === "Every cited evidence ID must be a non-empty string.") {
+    return { category: "invalid_type", fieldPath: "citedEvidenceIds" };
+  }
+  if (issue === "proposedAction must be an object.") {
+    return { category: "invalid_type", fieldPath: "proposedAction" };
+  }
+  if (issue === "proposedAction.type must be an allowed action type.") {
+    return { category: "invalid_enum", fieldPath: "proposedAction.type" };
+  }
+  if (
+    issue === "RETRY_PAYMENT requires a non-empty cycleId." ||
+    issue === "RETRY_PAYMENT must only include cycleId."
+  ) {
+    return {
+      category: issue.includes("requires") ? "invalid_value" : "invalid_action_shape",
+      fieldPath: issue.includes("requires")
+        ? "proposedAction.cycleId"
+        : "proposedAction",
+    };
+  }
+  if (
+    issue === "MODIFY_AMOUNT must only include amount." ||
+    issue.startsWith("MODIFY_AMOUNT requires a safe integer")
+  ) {
+    return {
+      category: issue.includes("requires") ? "invalid_value" : "invalid_action_shape",
+      fieldPath: issue.includes("requires")
+        ? "proposedAction.amount"
+        : "proposedAction",
+    };
+  }
+  if (
+    issue === "MODIFY_DEBIT_DAY must only include debitDay." ||
+    issue.startsWith("MODIFY_DEBIT_DAY requires a safe integer")
+  ) {
+    return {
+      category: issue.includes("requires") ? "invalid_value" : "invalid_action_shape",
+      fieldPath: issue.includes("requires")
+        ? "proposedAction.debitDay"
+        : "proposedAction",
+    };
+  }
+  if (
+    issue === "NONE must not include action parameters." ||
+    issue === "RESTART_SIP must not include action parameters."
+  ) {
+    return { category: "invalid_action_shape", fieldPath: "proposedAction" };
+  }
+  if (issue === "proposedAction.type is not supported.") {
+    return { category: "invalid_enum", fieldPath: "proposedAction.type" };
+  }
+  if (issue === "followUpQuestion must be a string.") {
+    return { category: "invalid_type", fieldPath: "followUpQuestion" };
+  }
+  if (issue.startsWith("followUpQuestion must contain ")) {
+    return { category: "invalid_value", fieldPath: "followUpQuestion" };
+  }
+  if (issue === "refusal must be a boolean.") {
+    return { category: "invalid_type", fieldPath: "refusal" };
+  }
+
+  return { category: "invalid_value", fieldPath: "unknown" };
+}
+
+function failedParse(issues: string[]): ModelOutputParseFailure & { success: false } {
+  const seen = new Set<string>();
+  const validationDiagnostics: AssistantValidationDiagnostic[] = [];
+
+  for (const issue of issues) {
+    const diagnostic = validationDiagnosticForIssue(issue);
+    const key = `${diagnostic.category}:${diagnostic.fieldPath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    validationDiagnostics.push(diagnostic);
+    if (validationDiagnostics.length >= 12) break;
+  }
+
+  return { success: false, issues, validationDiagnostics };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return (
@@ -267,27 +417,26 @@ export function parseAssistantModelOutput(
     const text = raw.trim();
 
     if (text.length === 0) {
-      return { success: false, issues: ["Model output is empty."] };
+      return failedParse(["Model output is empty."]);
     }
 
     if (text.length > MAX_MODEL_OUTPUT_CHARS) {
-      return {
-        success: false,
-        issues: [`Model output exceeds ${MAX_MODEL_OUTPUT_CHARS} characters.`],
-      };
+      return failedParse([
+        `Model output exceeds ${MAX_MODEL_OUTPUT_CHARS} characters.`,
+      ]);
     }
 
     try {
       value = JSON.parse(text);
     } catch {
-      return { success: false, issues: ["Model output is not valid JSON."] };
+      return failedParse(["Model output is not valid JSON."]);
     }
   } else {
     value = raw;
   }
 
   if (!isRecord(value)) {
-    return { success: false, issues: ["Model output must be a JSON object."] };
+    return failedParse(["Model output must be a JSON object."]);
   }
 
   for (const key of Object.keys(value)) {
@@ -401,7 +550,7 @@ export function parseAssistantModelOutput(
     followUpQuestion === null ||
     typeof value.refusal !== "boolean"
   ) {
-    return { success: false, issues };
+    return failedParse(issues);
   }
 
   return {

@@ -12,6 +12,7 @@ import type {
   RuntimeGateFailure,
   RuntimeGateFailureCode,
   RuntimeGateResult,
+  AssistantValidationDiagnostic,
   AssistantQualityLabel,
 } from "./types";
 
@@ -98,6 +99,51 @@ function addUnique(
   if (!failures.has(code)) {
     failures.set(code, { code, message, repairable: true });
   }
+}
+
+function validationDiagnosticsForGateFailures(
+  failures: RuntimeGateFailure[],
+): AssistantValidationDiagnostic[] {
+  const diagnostics: AssistantValidationDiagnostic[] = [];
+
+  for (const failure of failures) {
+    switch (failure.code) {
+      case "INTENT_MISMATCH":
+        diagnostics.push({ category: "invalid_enum", fieldPath: "intent" });
+        break;
+      case "CITATION_SCOPE_VIOLATION":
+        diagnostics.push({
+          category: "invalid_citation",
+          fieldPath: "citedEvidenceIds",
+        });
+        break;
+      case "MISSING_CITATIONS":
+      case "MISSING_REQUIRED_CITATION_TIER":
+        diagnostics.push({
+          category: "missing_citation",
+          fieldPath: "citedEvidenceIds",
+        });
+        break;
+      case "DUPLICATE_CITATION":
+        diagnostics.push({
+          category: "duplicate_citation",
+          fieldPath: "citedEvidenceIds",
+        });
+        break;
+      case "ACTION_NOT_ALLOWED_FOR_INTENT":
+      case "ACTION_INVALID":
+      case "ACTION_WITH_REFUSAL":
+        diagnostics.push({
+          category: "invalid_action_shape",
+          fieldPath: "proposedAction",
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  return diagnostics;
 }
 
 function allMatches(text: string, pattern: RegExp): RegExpExecArray[] {
@@ -504,10 +550,11 @@ export function evaluateRuntimeGate(input: {
         criticalFailures: [
           {
             code: "SCHEMA_INVALID",
-            message: parsed.issues.join(" "),
+            message: "Model output did not match the required response structure.",
             repairable: true,
           },
         ],
+        validationDiagnostics: parsed.validationDiagnostics,
         checkedAt,
         qualityLabel: null,
       },
@@ -717,9 +764,12 @@ export function evaluateRuntimeGate(input: {
   }
 
   const criticalFailures = [...failures.values()];
+  const validationDiagnostics =
+    validationDiagnosticsForGateFailures(criticalFailures);
   const result: RuntimeGateResult = {
     passed: criticalFailures.length === 0,
     criticalFailures,
+    ...(validationDiagnostics.length > 0 ? { validationDiagnostics } : {}),
     checkedAt,
     qualityLabel:
       criticalFailures.length === 0 ? qualityLabelFor(output, packet) : null,

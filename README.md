@@ -78,8 +78,8 @@ Versioned golden dataset and deterministic offline evaluation under
 - `src/lib/evaluation/pipeline.ts` and `cli.ts` — fixture-mode pipeline and command-line entry points.
 
 Phase 4 evaluates handcrafted reference fixtures, not live model output. It does
-not call OpenAI, read `OPENAI_API_KEY`, create AI routes, add a database, use
-embeddings, or execute transactions. The report always records
+not call a live model or read `GROQ_API_KEY`; it also does not create AI routes,
+use embeddings, or execute transactions. The report always records
 `liveModelOutputs: false` and `modelCallsMade: 0`.
 
 All 48 cases remain `pending_human_review` with unresolved Evidence Log
@@ -102,8 +102,8 @@ SIP/payment integration is present.
 - `types.ts` — assistant intents, actions, statuses, quality labels, fallback
   reasons, context packet and result contracts.
 - `config.ts` — fail-closed environment configuration for
-  `ASSISTANT_ENABLED`, `OPENAI_API_KEY`, `OPENAI_MODEL` and
-  `MAX_OUTPUT_TOKENS`.
+  `ASSISTANT_ENABLED`, `GROQ_API_KEY`, `GROQ_MODEL`, `GROQ_RESPONSE_FORMAT`
+  and `MAX_OUTPUT_TOKENS`.
 - `intent.ts` — deterministic classification of all 14 supported intents, with
   safety-critical overrides taking precedence over the selected category.
 - `missing-info.ts` — deterministic clarification checks that run before any
@@ -114,9 +114,10 @@ SIP/payment integration is present.
   as untrusted data.
 - `schemas.ts` — strict JSON Schema for Structured Outputs and a defensive
   parser that rejects extra properties, invalid actions and unsafe values.
-- `client.ts` — lazy, `server-only` OpenAI Responses API adapter using the
-  configured model, `text.format`, `max_output_tokens`, timeout, no SDK retries
-  and `store: false`.
+- `client.ts` — lazy, `server-only` Groq Chat Completions adapter using the
+  OpenAI-compatible SDK, configured response format (strict JSON Schema by
+  default or JSON Object mode), bounded `max_completion_tokens`, timeout and no
+  SDK retries.
 - `gate.ts` — mandatory runtime safety gate covering schema, intent, citations,
   evidence tiers, demo-policy attribution, account-specific separation,
   amounts, dates, payment/SIP state, action allowlist and domain previews,
@@ -134,8 +135,8 @@ deterministic fallback`. A critical gate failure always blocks approval and
 display. The model never receives the API key, never executes an action, and
 never controls the quality label or final safety decision.
 
-OpenAI is optional and disabled by default. Tests and fixture evaluation run
-offline with mocked model clients and do not require a live key. `OPENAI_MODEL`
+GroqCloud is optional and disabled by default. Tests and fixture evaluation run
+offline with mocked model clients and do not require a live key. `GROQ_MODEL`
 must be supplied explicitly; there is no hardcoded or silently substituted
 model. `.env.example` contains placeholders only. Any live call requires an
 explicitly configured key and separate authorization.
@@ -224,8 +225,8 @@ value of at least 32 UTF-8 bytes. Do not commit it; do not rotate it between
 requests. If it is missing or invalid, simulated-action endpoints are
 unavailable.
 
-AI remains disabled by default. For this demo, leave `OPENAI_API_KEY` and
-`OPENAI_MODEL` unset. Both are server-only; never expose a key through a
+AI remains disabled by default. For this demo, leave `GROQ_API_KEY` and
+`GROQ_MODEL` unset. Both are server-only; never expose a key through a
 `NEXT_PUBLIC_` variable. The model name is not defaulted or substituted, and
 missing required AI configuration fails closed without a model request.
 Evaluation commands do not make live model calls. Fixture evaluation is not
@@ -362,6 +363,6 @@ White backgrounds, green `#00D09C` accents, dark neutral typography, rounded car
 
 Phase 6E.2 UI implementation and manual browser verification are complete.
 Phase 7A audited deployment readiness, and Phase 7B prepares source control.
-No Vercel deployment or live OpenAI evaluation has been performed. The fixture
+No Vercel deployment or live GroqCloud evaluation has been performed. The fixture
 report remains `NEEDS_REVIEW` until its human reviews and Evidence Log
 references are resolved.

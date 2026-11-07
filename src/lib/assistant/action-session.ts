@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
 import {
   ASSISTANT_DEMO_SCENARIOS,
@@ -45,7 +45,7 @@ export interface ActionDemoSession {
 export type ActionSessionReadResult =
   | { status: "MISSING" }
   | { status: "INVALID" }
-  | { status: "EXPIRED" }
+  | { status: "EXPIRED"; session: ActionDemoSession }
   | { status: "VALID"; session: ActionDemoSession };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -160,7 +160,7 @@ function isPendingPreview(value: unknown): value is PendingActionPreview {
   );
 }
 
-function isActionDemoSession(value: unknown): value is ActionDemoSession {
+export function isActionDemoSession(value: unknown): value is ActionDemoSession {
   if (!isRecord(value)) return false;
   const pendingPreview = value.pendingPreview;
 
@@ -181,6 +181,11 @@ function isActionDemoSession(value: unknown): value is ActionDemoSession {
       (pendingPreview.scenario === value.scenario &&
         pendingPreview.stateVersion <= value.stateVersion))
   );
+}
+
+/** Hash the complete, HMAC-signed cookie token for server-side CAS storage. */
+export function hashActionSessionToken(token: string): Buffer {
+  return createHash("sha256").update(token, "utf8").digest();
 }
 
 export function isSigningSecretReady(secret: string | undefined): secret is string {
@@ -272,7 +277,7 @@ export function readSignedActionSession(
     });
     const parsed: unknown = JSON.parse(payload.toString("utf8"));
     if (!isActionDemoSession(parsed)) return { status: "INVALID" };
-    if (Date.parse(parsed.expiresAt) <= nowMs) return { status: "EXPIRED" };
+    if (Date.parse(parsed.expiresAt) <= nowMs) return { status: "EXPIRED", session: parsed };
     return { status: "VALID", session: parsed };
   } catch {
     return { status: "INVALID" };

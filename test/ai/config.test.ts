@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ASSISTANT_SMOKE_MAX_OUTPUT_TOKENS } from "../../scripts/assistant-smoke-config";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_MAX_INPUT_CHARS,
@@ -9,8 +10,8 @@ import {
 describe("assistant configuration", () => {
   it("fails closed when the assistant is not explicitly enabled", () => {
     const result = resolveAssistantConfig({
-      OPENAI_API_KEY: "test-api-key",
-      OPENAI_MODEL: "configured-model",
+      GROQ_API_KEY: "test-api-key",
+      GROQ_MODEL: "configured-model",
     });
 
     expect(result).toMatchObject({
@@ -24,8 +25,8 @@ describe("assistant configuration", () => {
     for (const value of ["TRUE", "1", "yes", "enabled", ""]) {
       const result = resolveAssistantConfig({
         ASSISTANT_ENABLED: value,
-        OPENAI_API_KEY: "test-api-key",
-        OPENAI_MODEL: "configured-model",
+        GROQ_API_KEY: "test-api-key",
+        GROQ_MODEL: "configured-model",
       });
 
       expect(result, value).toMatchObject({
@@ -38,7 +39,7 @@ describe("assistant configuration", () => {
   it("fails closed when the API key is missing", () => {
     const result = resolveAssistantConfig({
       ASSISTANT_ENABLED: "true",
-      OPENAI_MODEL: "configured-model",
+      GROQ_MODEL: "configured-model",
     });
 
     expect(result).toMatchObject({
@@ -48,10 +49,10 @@ describe("assistant configuration", () => {
     });
   });
 
-  it("fails closed when OPENAI_MODEL is missing and never substitutes a model", () => {
+  it("fails closed when GROQ_MODEL is missing and never substitutes a model", () => {
     const result = resolveAssistantConfig({
       ASSISTANT_ENABLED: "true",
-      OPENAI_API_KEY: "test-api-key",
+      GROQ_API_KEY: "test-api-key",
     });
 
     expect(result).toMatchObject({
@@ -64,8 +65,8 @@ describe("assistant configuration", () => {
   it("uses the exact configured model and safe defaults", () => {
     const result = resolveAssistantConfig({
       ASSISTANT_ENABLED: "true",
-      OPENAI_API_KEY: "test-api-key",
-      OPENAI_MODEL: "model-from-environment",
+      GROQ_API_KEY: "test-api-key",
+      GROQ_MODEL: "model-from-environment",
     });
 
     expect(result.status).toBe("READY");
@@ -75,6 +76,7 @@ describe("assistant configuration", () => {
     }
 
     expect(result.config.model).toBe("model-from-environment");
+    expect(result.config.responseFormat).toBe("json_object");
     expect(result.config.maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
     expect(result.config.requestTimeoutMs).toBe(DEFAULT_REQUEST_TIMEOUT_MS);
     expect(result.config.maxInputChars).toBe(DEFAULT_MAX_INPUT_CHARS);
@@ -85,8 +87,8 @@ describe("assistant configuration", () => {
     (value) => {
       const result = resolveAssistantConfig({
         ASSISTANT_ENABLED: "true",
-        OPENAI_API_KEY: "test-api-key",
-        OPENAI_MODEL: "configured-model",
+        GROQ_API_KEY: "test-api-key",
+        GROQ_MODEL: "configured-model",
         MAX_OUTPUT_TOKENS: value,
       });
 
@@ -98,18 +100,47 @@ describe("assistant configuration", () => {
     },
   );
 
-  it("accepts a bounded MAX_OUTPUT_TOKENS override", () => {
+  it("accepts the bounded 1024-token controlled-smoke override", () => {
     const result = resolveAssistantConfig({
       ASSISTANT_ENABLED: "true",
-      OPENAI_API_KEY: "test-api-key",
-      OPENAI_MODEL: "configured-model",
-      MAX_OUTPUT_TOKENS: "1200",
+      GROQ_API_KEY: "test-api-key",
+      GROQ_MODEL: "configured-model",
+      MAX_OUTPUT_TOKENS: String(ASSISTANT_SMOKE_MAX_OUTPUT_TOKENS),
     });
 
     expect(result.status).toBe("READY");
 
     if (result.status === "READY") {
-      expect(result.config.maxOutputTokens).toBe(1200);
+      expect(result.config.maxOutputTokens).toBe(ASSISTANT_SMOKE_MAX_OUTPUT_TOKENS);
     }
+  });
+
+  it("accepts JSON Object mode when explicitly configured", () => {
+    const result = resolveAssistantConfig({
+      ASSISTANT_ENABLED: "true",
+      GROQ_API_KEY: "test-api-key",
+      GROQ_MODEL: "configured-model",
+      GROQ_RESPONSE_FORMAT: "json_object",
+    });
+
+    expect(result.status).toBe("READY");
+    if (result.status === "READY") {
+      expect(result.config.responseFormat).toBe("json_object");
+    }
+  });
+
+  it("fails closed for an unknown response format", () => {
+    const result = resolveAssistantConfig({
+      ASSISTANT_ENABLED: "true",
+      GROQ_API_KEY: "test-api-key",
+      GROQ_MODEL: "configured-model",
+      GROQ_RESPONSE_FORMAT: "json_schema_relaxed",
+    });
+
+    expect(result).toMatchObject({
+      status: "UNAVAILABLE",
+      reason: "INVALID_RESPONSE_FORMAT",
+      fallbackReason: "MISSING_CONFIG",
+    });
   });
 });

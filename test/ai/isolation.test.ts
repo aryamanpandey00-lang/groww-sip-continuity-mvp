@@ -29,15 +29,15 @@ function readAll(files: string[]): string {
 const nodeRequire = createRequire(import.meta.url);
 
 describe("AI isolation and secret safety", () => {
-  it("never uses a browser-exposed OpenAI key variable", () => {
+  it("never uses a browser-exposed Groq key variable", () => {
     const source = readAll(sourceFiles("src"));
     const envExample = fs.readFileSync(".env.example", "utf8");
 
-    expect(source).not.toContain("NEXT_PUBLIC_OPENAI_API_KEY");
-    expect(envExample).not.toContain("NEXT_PUBLIC_OPENAI_API_KEY");
+    expect(source).not.toContain("NEXT_PUBLIC_GROQ_API_KEY");
+    expect(envExample).not.toContain("NEXT_PUBLIC_GROQ_API_KEY");
   });
 
-  it("keeps the OpenAI SDK adapter server-only", () => {
+  it("keeps the OpenAI-compatible Groq adapter server-only", () => {
     const clientSource = fs.readFileSync("src/lib/ai/client.ts", "utf8");
 
     expect(clientSource.startsWith('import "server-only";')).toBe(true);
@@ -84,7 +84,7 @@ describe("AI isolation and secret safety", () => {
     const promptSource = fs.readFileSync("src/lib/ai/prompts.ts", "utf8");
 
     expect(promptSource).not.toContain("apiKey");
-    expect(promptSource).not.toContain("OPENAI_API_KEY");
+    expect(promptSource).not.toContain("GROQ_API_KEY");
     expect(promptSource).not.toContain("NEXT_PUBLIC");
   });
 
@@ -92,8 +92,8 @@ describe("AI isolation and secret safety", () => {
     const envExample = fs.readFileSync(".env.example", "utf8");
 
     expect(envExample).toContain("ASSISTANT_ENABLED=false");
-    expect(envExample).toContain("OPENAI_API_KEY=");
-    expect(envExample).toContain("OPENAI_MODEL=");
+    expect(envExample).toContain("GROQ_API_KEY=");
+    expect(envExample).toContain("GROQ_MODEL=openai/gpt-oss-20b");
     expect(envExample).toContain("MAX_OUTPUT_TOKENS=700");
     expect(envExample).not.toMatch(/sk-[A-Za-z0-9]/);
   });

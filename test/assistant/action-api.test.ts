@@ -626,7 +626,7 @@ describe("simulated action API", () => {
 
     expect(response.status).toBe(200);
     expect(body.preview.sourceLabel).toContain("no AI used");
-    expect(source).not.toMatch(/from ["'][^"']*ai\/pipeline|createOpenAIModelClient/);
+    expect(source).not.toMatch(/from ["'][^"']*ai\/pipeline|createGroqModelClient/);
   });
 
   it("validates origin, content type, and request fields", async () => {

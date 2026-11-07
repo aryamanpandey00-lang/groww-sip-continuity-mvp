@@ -31,6 +31,10 @@ import {
   resolveAssistantTokenBudgetCoordinator,
 } from "./token-budget";
 import {
+  createAssistantDemoQuotaReservationId,
+  resolveAssistantDemoQuotaCoordinator,
+} from "./demo-quota";
+import {
   buildAssistantModelRequest,
   buildRepairModelRequest,
 } from "./prompts";
@@ -40,8 +44,11 @@ import type {
   AssistantIntent,
   AssistantModelCallResult,
   AssistantModelClient,
+  AssistantTokenBudgetReservation,
   AssistantTokenBudgetCoordinator,
+  AssistantDemoQuotaReservation,
   AssistantModelDiagnostics,
+  AssistantProviderDiagnostic,
   AssistantRequest,
   AssistantResult,
   AssistantEvidenceItem,
@@ -55,11 +62,55 @@ interface CallTelemetry {
   usage: AssistantTokenUsage | null;
   modelCalls: number;
   usageComplete: boolean;
+  providerDiagnostic: AssistantProviderDiagnostic | null;
 }
 
 interface ModelAttempt {
   result: AssistantModelCallResult;
   telemetry: CallTelemetry;
+}
+
+function maximumObservedTokenCount(
+  usage: AssistantTokenUsage | null,
+): number | null {
+  if (!usage) return null;
+  const counts = [usage.inputTokens, usage.outputTokens, usage.totalTokens].filter(
+    (value): value is number =>
+      value !== undefined && Number.isSafeInteger(value) && value >= 0,
+  );
+
+  if (
+    usage.inputTokens !== undefined &&
+    usage.outputTokens !== undefined &&
+    Number.isSafeInteger(usage.inputTokens + usage.outputTokens)
+  ) {
+    counts.push(usage.inputTokens + usage.outputTokens);
+  }
+
+  return counts.length > 0 ? Math.max(...counts) : null;
+}
+
+async function withDemoQuotaReservation<T>(
+  reservation: AssistantDemoQuotaReservation | null,
+  operation: (settleSuccessfulResponse: () => Promise<void>) => Promise<T>,
+): Promise<T> {
+  let successfulResponseSettled = false;
+  const settleSuccessfulResponse = async (): Promise<void> => {
+    if (reservation) await reservation.settle(true);
+    successfulResponseSettled = true;
+  };
+
+  try {
+    return await operation(settleSuccessfulResponse);
+  } finally {
+    if (reservation && !successfulResponseSettled) {
+      try {
+        await reservation.settle(false);
+      } catch {
+        // The shared reservation expires automatically; keep this path closed.
+      }
+    }
+  }
 }
 
 async function callModel(
@@ -69,12 +120,14 @@ async function callModel(
   maxOutputTokens: number,
 ): Promise<ModelAttempt> {
   const startedAt = Date.now();
-  let reservation;
+  let reservation: AssistantTokenBudgetReservation | null = null;
+  let maxTokens = 0;
 
   try {
+    maxTokens = estimateMaxAssistantCallTokens(request, maxOutputTokens);
     reservation = await budgetCoordinator.reserve({
       reservationId: createAssistantBudgetReservationId(),
-      maxTokens: estimateMaxAssistantCallTokens(request, maxOutputTokens),
+      maxTokens,
       nowMs: Date.now(),
     });
   } catch {
@@ -90,6 +143,7 @@ async function callModel(
         usage: null,
         modelCalls: 0,
         usageComplete: true,
+        providerDiagnostic: null,
       },
     };
   }
@@ -103,25 +157,62 @@ async function callModel(
   }
 
   const normalizedUsage = normalizeAssistantTokenUsage(result.usage);
+  const observedTokenCount = maximumObservedTokenCount(normalizedUsage.usage);
+  const reservationExceeded =
+    observedTokenCount !== null && observedTokenCount > maxTokens;
+  const modelOutputLimitExceeded =
+    normalizedUsage.usage?.outputTokens !== undefined &&
+    normalizedUsage.usage.outputTokens > maxOutputTokens;
   let settlementFailed = false;
 
   try {
     await reservation.settle(
-      normalizedUsage.complete
-        ? normalizedUsage.usage?.totalTokens ?? null
-        : null,
+      reservationExceeded
+        ? observedTokenCount
+        : normalizedUsage.complete
+          ? normalizedUsage.usage?.totalTokens ?? null
+          : null,
     );
   } catch {
     settlementFailed = true;
   }
 
-  const normalizedResult = settlementFailed
-    ? {
-        status: "UNAVAILABLE" as const,
-        errorCode: "token_budget_settlement_failed",
-        usage: normalizedUsage.usage ?? undefined,
-      }
-    : { ...result, usage: normalizedUsage.usage ?? undefined };
+  let normalizedResult: AssistantModelCallResult;
+  if (settlementFailed) {
+    normalizedResult = {
+      status: "UNAVAILABLE",
+      errorCode: "token_budget_settlement_failed",
+      usage: normalizedUsage.usage ?? undefined,
+      providerDiagnostic: result.providerDiagnostic,
+    };
+  } else if (reservationExceeded) {
+    normalizedResult = {
+      status: "UNAVAILABLE",
+      errorCode: "token_budget_reservation_exceeded",
+      usage: normalizedUsage.usage ?? undefined,
+      providerDiagnostic: result.providerDiagnostic,
+    };
+  } else if (modelOutputLimitExceeded) {
+    normalizedResult = {
+      status: "UNAVAILABLE",
+      errorCode: "model_output_limit_exceeded",
+      usage: normalizedUsage.usage ?? undefined,
+      providerDiagnostic: result.providerDiagnostic,
+    };
+  } else if (
+    !normalizedUsage.complete &&
+    result.status !== "UNAVAILABLE" &&
+    result.status !== "TIMEOUT"
+  ) {
+    normalizedResult = {
+      status: "UNAVAILABLE",
+      errorCode: "token_usage_incomplete",
+      usage: normalizedUsage.usage ?? undefined,
+      providerDiagnostic: result.providerDiagnostic,
+    };
+  } else {
+    normalizedResult = { ...result, usage: normalizedUsage.usage ?? undefined };
+  }
 
   return {
     result: normalizedResult,
@@ -134,6 +225,7 @@ async function callModel(
       usage: normalizedUsage.usage,
       modelCalls: 1,
       usageComplete: normalizedUsage.complete,
+      providerDiagnostic: normalizedResult.providerDiagnostic ?? null,
     },
   };
 }
@@ -180,6 +272,7 @@ function mergeTelemetry(
     usage: addUsage(previous.usage, next.usage, previous.modelCalls),
     modelCalls: previous.modelCalls + next.modelCalls,
     usageComplete: previous.usageComplete && next.usageComplete,
+    providerDiagnostic: next.providerDiagnostic ?? previous.providerDiagnostic,
   };
 }
 
@@ -268,7 +361,7 @@ function evidenceQuestionForIntent(
 }
 
 /**
- * Runs the server-side assistant pipeline. The OpenAI client is only imported
+ * Runs the server-side assistant pipeline. The Groq client is only imported
  * lazily on the approved model path, so configuration failures, deterministic
  * clarification, safety refusals and offline tests never construct an SDK
  * client or require a live API key.
@@ -291,6 +384,7 @@ export async function runAssistant(
   const retrievedEvidenceIds: string[] = [];
   let retrievedEvidenceItems: AssistantEvidenceItem[] = [];
   let telemetry: CallTelemetry | null = null;
+  let localProviderDiagnostic: AssistantProviderDiagnostic | null = null;
   let repairAttempted = false;
   let repairSucceeded = false;
 
@@ -298,6 +392,14 @@ export async function runAssistant(
     content: AssistantFallbackContent,
     gateResult: RuntimeGateResult | null,
   ): AssistantResult => {
+    const providerDiagnostic = telemetry?.providerDiagnostic
+      ? {
+          ...telemetry.providerDiagnostic,
+          ...(localProviderDiagnostic?.validationDiagnostics
+            ? { validationDiagnostics: localProviderDiagnostic.validationDiagnostics }
+            : {}),
+        }
+      : localProviderDiagnostic;
     const result = buildResult({
       requestId,
       intent,
@@ -326,6 +428,7 @@ export async function runAssistant(
       modelCalls: result.model?.modelCalls ?? 0,
       tokenUsageComplete: result.model?.usageComplete ?? true,
       repairAttempted,
+      providerDiagnostic,
       timestamp: generatedAt,
     });
 
@@ -367,6 +470,11 @@ export async function runAssistant(
     : resolveAssistantConfig(dependencies.env ?? process.env);
 
   if (configResolution.status === "UNAVAILABLE") {
+    localProviderDiagnostic = {
+      httpStatus: null,
+      errorCategory: "configuration_error",
+      requestId: null,
+    };
     return finish(
       buildConfigUnavailableContent(
         configResolution.reason,
@@ -431,107 +539,164 @@ export async function runAssistant(
     return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
   }
 
-  let modelClient = dependencies.modelClient;
-
-  if (!modelClient) {
-    try {
-      const { createOpenAIModelClient } = await import("./client");
-      modelClient = createOpenAIModelClient(config);
-    } catch {
-      return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
-    }
-  }
-
-  const firstCall = await callModel(
-    modelClient,
-    buildAssistantModelRequest(packet),
-    budgetCoordinator,
-    config.maxOutputTokens,
+  const environment = dependencies.env ?? process.env;
+  const isProduction =
+    environment.NODE_ENV === "production" || process.env.NODE_ENV === "production";
+  const demoQuotaCoordinator = resolveAssistantDemoQuotaCoordinator(
+    environment,
+    dependencies.demoQuotaCoordinator,
   );
-  telemetry = mergeTelemetry(telemetry, firstCall.telemetry);
-
-  if (firstCall.result.status === "TIMEOUT") {
-    return finish(buildModelUnavailableContent("MODEL_TIMEOUT"), null);
-  }
-
-  if (firstCall.result.status === "UNAVAILABLE") {
+  if (isProduction && !demoQuotaCoordinator) {
     return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
   }
 
-  let previousOutput =
-    firstCall.result.status === "OK" ? firstCall.result.outputText : "";
-  let gateEvaluation = evaluateRuntimeGate({
-    rawOutput: previousOutput,
-    packet,
-    state,
-  });
+  let demoQuotaReservation: AssistantDemoQuotaReservation | null = null;
+  if (demoQuotaCoordinator) {
+    try {
+      demoQuotaReservation = await demoQuotaCoordinator.reserve({
+        reservationId: createAssistantDemoQuotaReservationId(),
+        nowMs: now().getTime(),
+      });
+    } catch {
+      demoQuotaReservation = null;
+    }
+    if (!demoQuotaReservation) {
+      return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
+    }
+  }
 
-  if (!gateEvaluation.result.passed) {
-    repairAttempted = true;
+  return withDemoQuotaReservation(demoQuotaReservation, async (settleSuccessfulResponse) => {
+    let modelClient = dependencies.modelClient;
 
-    const repairCall = await callModel(
+    if (!modelClient) {
+      try {
+        const { createGroqModelClient } = await import("./client");
+        modelClient = createGroqModelClient(config);
+      } catch {
+        localProviderDiagnostic = {
+          httpStatus: null,
+          errorCategory: "configuration_error",
+          requestId: null,
+        };
+        return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
+      }
+    }
+
+    const firstCall = await callModel(
       modelClient,
-      buildRepairModelRequest(
-        packet,
-        gateEvaluation.result.criticalFailures.map((failure) => failure.code),
-        previousOutput,
-      ),
+      buildAssistantModelRequest(packet),
       budgetCoordinator,
       config.maxOutputTokens,
     );
-    telemetry = mergeTelemetry(telemetry, repairCall.telemetry);
+    telemetry = mergeTelemetry(telemetry, firstCall.telemetry);
 
-    if (repairCall.result.status === "TIMEOUT") {
+    if (firstCall.result.status === "TIMEOUT") {
       return finish(buildModelUnavailableContent("MODEL_TIMEOUT"), null);
     }
 
-    if (repairCall.result.status === "UNAVAILABLE") {
+    if (firstCall.result.status === "UNAVAILABLE") {
       return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
     }
 
-    previousOutput =
-      repairCall.result.status === "OK" ? repairCall.result.outputText : "";
-    gateEvaluation = evaluateRuntimeGate({
+    let previousOutput =
+      firstCall.result.status === "OK" ? firstCall.result.outputText : "";
+    let gateEvaluation = evaluateRuntimeGate({
       rawOutput: previousOutput,
       packet,
       state,
     });
 
     if (!gateEvaluation.result.passed) {
+      if (gateEvaluation.result.validationDiagnostics?.length) {
+        const schemaInvalid = gateEvaluation.result.criticalFailures.some(
+          (failure) => failure.code === "SCHEMA_INVALID",
+        );
+        localProviderDiagnostic = {
+          httpStatus: 200,
+          errorCategory: schemaInvalid ? "schema_error" : "response_error",
+          requestId: null,
+          validationDiagnostics: gateEvaluation.result.validationDiagnostics,
+        };
+      }
+      if (dependencies.allowRepair === false) {
+        return finish(
+          buildGateFailureContent("MODEL_INVALID_OUTPUT"),
+          gateEvaluation.result,
+        );
+      }
+
+      repairAttempted = true;
+
+      const repairCall = await callModel(
+        modelClient,
+        buildRepairModelRequest(
+          packet,
+          gateEvaluation.result.criticalFailures.map((failure) => failure.code),
+          previousOutput,
+        ),
+        budgetCoordinator,
+        config.maxOutputTokens,
+      );
+      telemetry = mergeTelemetry(telemetry, repairCall.telemetry);
+
+      if (repairCall.result.status === "TIMEOUT") {
+        return finish(buildModelUnavailableContent("MODEL_TIMEOUT"), null);
+      }
+
+      if (repairCall.result.status === "UNAVAILABLE") {
+        return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
+      }
+
+      previousOutput =
+        repairCall.result.status === "OK" ? repairCall.result.outputText : "";
+      gateEvaluation = evaluateRuntimeGate({
+        rawOutput: previousOutput,
+        packet,
+        state,
+      });
+
+      if (!gateEvaluation.result.passed) {
+        return finish(
+          buildGateFailureContent("REPAIR_FAILED"),
+          gateEvaluation.result,
+        );
+      }
+
+      repairSucceeded = true;
+    }
+
+    const output = gateEvaluation.output;
+
+    if (!output) {
       return finish(
-        buildGateFailureContent("REPAIR_FAILED"),
+        buildGateFailureContent("MODEL_INVALID_OUTPUT"),
         gateEvaluation.result,
       );
     }
 
-    repairSucceeded = true;
-  }
+    try {
+      await settleSuccessfulResponse();
+    } catch {
+      return finish(buildModelUnavailableContent("MODEL_UNAVAILABLE"), null);
+    }
 
-  const output = gateEvaluation.output;
-
-  if (!output) {
     return finish(
-      buildGateFailureContent("MODEL_INVALID_OUTPUT"),
+      {
+        status: "APPROVED",
+        qualityLabel: gateEvaluation.result.qualityLabel ?? "Limited evidence",
+        fallbackReason: "NONE",
+        evaluationFallbackReason: "NONE",
+        directAnswer: output.directAnswer,
+        keyPoints: output.keyPoints,
+        citedEvidenceIds: output.citedEvidenceIds,
+        proposedAction: output.proposedAction,
+        followUpQuestion: output.followUpQuestion,
+        refusal: output.refusal,
+        fallbackUsed: false,
+      },
       gateEvaluation.result,
     );
-  }
-
-  return finish(
-    {
-      status: "APPROVED",
-      qualityLabel: gateEvaluation.result.qualityLabel ?? "Limited evidence",
-      fallbackReason: "NONE",
-      evaluationFallbackReason: "NONE",
-      directAnswer: output.directAnswer,
-      keyPoints: output.keyPoints,
-      citedEvidenceIds: output.citedEvidenceIds,
-      proposedAction: output.proposedAction,
-      followUpQuestion: output.followUpQuestion,
-      refusal: output.refusal,
-      fallbackUsed: false,
-    },
-    gateEvaluation.result,
-  );
+  });
 }
 
 export type { AssistantContextPacket };

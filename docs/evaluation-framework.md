@@ -3,13 +3,13 @@
 ## Scope
 
 Phase 4 adds a deterministic, offline evaluation framework for the future
-OpenAI-powered SIP Continuity Assistant. It validates the golden dataset and
+model-powered SIP Continuity Assistant. It validates the golden dataset and
 scores handcrafted candidate responses in **fixture mode**.
 
 It does **not**:
 
-- call OpenAI or any other model;
-- read `OPENAI_API_KEY` or `OPENAI_MODEL`;
+- call GroqCloud or any other model;
+- read `GROQ_API_KEY` or `GROQ_MODEL`;
 - create AI API routes;
 - use embeddings, a vector database or a database;
 - execute real financial transactions;

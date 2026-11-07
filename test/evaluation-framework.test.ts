@@ -621,7 +621,7 @@ describe("fixture validation and evaluation gates", () => {
       "tokenUsage",
       "latency",
       "apiCost",
-      "OPENAI_API_KEY",
+      "GROQ_API_KEY",
       "gpt-4",
       "gpt-5",
     ]) {

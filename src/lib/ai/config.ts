@@ -2,6 +2,7 @@ import type {
   AssistantConfig,
   AssistantConfigResolution,
   AssistantFallbackReason,
+  AssistantResponseFormat,
 } from "./types";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 700;
@@ -12,8 +13,9 @@ export const DEFAULT_MAX_INPUT_CHARS = 2_000;
 
 export const ASSISTANT_ENV_KEYS = {
   enabled: "ASSISTANT_ENABLED",
-  apiKey: "OPENAI_API_KEY",
-  model: "OPENAI_MODEL",
+  apiKey: "GROQ_API_KEY",
+  model: "GROQ_MODEL",
+  responseFormat: "GROQ_RESPONSE_FORMAT",
   maxOutputTokens: "MAX_OUTPUT_TOKENS",
 } as const;
 
@@ -22,6 +24,7 @@ function unavailable(
     | "ASSISTANT_DISABLED"
     | "MISSING_API_KEY"
     | "MISSING_MODEL"
+    | "INVALID_RESPONSE_FORMAT"
     | "INVALID_MAX_OUTPUT_TOKENS",
 ): AssistantConfigResolution {
   const fallbackReason: AssistantFallbackReason =
@@ -52,12 +55,23 @@ function parseMaxOutputTokens(value: string | undefined): number | null {
   return parsed;
 }
 
+function parseResponseFormat(
+  value: string | undefined,
+): AssistantResponseFormat | null {
+  const normalized = value?.trim() ?? "";
+  if (!normalized) return "json_object";
+  if (normalized === "json_schema" || normalized === "json_object") {
+    return normalized;
+  }
+  return null;
+}
+
 /**
  * Resolves assistant configuration from an explicit environment object.
  *
  * The assistant fails closed: if it is not explicitly enabled, or if either the
  * API key or model is absent, no client is constructed and no request is made.
- * `OPENAI_MODEL` is never defaulted or substituted.
+ * `GROQ_MODEL` is never defaulted or substituted.
  */
 export function resolveAssistantConfig(
   env: Record<string, string | undefined> = process.env,
@@ -78,6 +92,14 @@ export function resolveAssistantConfig(
     return unavailable("MISSING_MODEL");
   }
 
+  const responseFormat = parseResponseFormat(
+    env[ASSISTANT_ENV_KEYS.responseFormat],
+  );
+
+  if (responseFormat === null) {
+    return unavailable("INVALID_RESPONSE_FORMAT");
+  }
+
   const maxOutputTokens = parseMaxOutputTokens(
     env[ASSISTANT_ENV_KEYS.maxOutputTokens],
   );
@@ -89,6 +111,7 @@ export function resolveAssistantConfig(
   const config: AssistantConfig = {
     apiKey,
     model,
+    responseFormat,
     maxOutputTokens,
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     maxInputChars: DEFAULT_MAX_INPUT_CHARS,

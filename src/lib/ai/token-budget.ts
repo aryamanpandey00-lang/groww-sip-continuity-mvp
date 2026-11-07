@@ -6,10 +6,29 @@ import type {
   AssistantTokenBudgetCoordinator,
   AssistantTokenUsage,
 } from "./types";
+import { MAX_MAX_OUTPUT_TOKENS, MIN_MAX_OUTPUT_TOKENS } from "./config";
+import {
+  ASSISTANT_RESPONSE_FORMAT_NAME,
+  ASSISTANT_RESPONSE_JSON_SCHEMA,
+} from "./schemas";
 
 export const LOCAL_ASSISTANT_TOKEN_BUDGET = 100_000;
 export const LOCAL_ASSISTANT_TOKEN_BUDGET_WINDOW_MS = 60 * 60 * 1_000;
-const INPUT_TOKEN_SAFETY_MARGIN = 256;
+export const MAX_ASSISTANT_MODEL_INPUT_BYTES = 24 * 1_024;
+export const ASSISTANT_MODEL_PROTOCOL_OVERHEAD_TOKENS = 1_024;
+const encoder = new TextEncoder();
+const RESPONSE_FORMAT_BYTES = encoder.encode(
+  JSON.stringify({
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: ASSISTANT_RESPONSE_FORMAT_NAME,
+        strict: true,
+        schema: ASSISTANT_RESPONSE_JSON_SCHEMA,
+      },
+    },
+  }),
+).byteLength;
 
 export interface NormalizedAssistantUsage {
   usage: AssistantTokenUsage | null;
@@ -25,7 +44,9 @@ function safeTokenCount(value: unknown): number | undefined {
 /**
  * Keep API-reported usage, derive the total only when both API-reported
  * components are present, and mark partial or inconsistent reports as
- * incomplete so the budget coordinator charges the reserved maximum.
+ * incomplete so the budget coordinator charges the reserved maximum. Groq
+ * Chat Completions reports prompt/completion tokens; reasoning tokens may be
+ * included in the top-level completion count, so nested details are not added.
  */
 export function normalizeAssistantTokenUsage(value: unknown): NormalizedAssistantUsage {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -33,8 +54,12 @@ export function normalizeAssistantTokenUsage(value: unknown): NormalizedAssistan
   }
 
   const record = value as Record<string, unknown>;
-  const inputTokens = safeTokenCount(record.input_tokens ?? record.inputTokens);
-  const outputTokens = safeTokenCount(record.output_tokens ?? record.outputTokens);
+  const inputTokens = safeTokenCount(
+    record.prompt_tokens ?? record.input_tokens ?? record.promptTokens ?? record.inputTokens,
+  );
+  const outputTokens = safeTokenCount(
+    record.completion_tokens ?? record.output_tokens ?? record.completionTokens ?? record.outputTokens,
+  );
   const reportedTotal = safeTokenCount(record.total_tokens ?? record.totalTokens);
   const derivedTotal =
     inputTokens !== undefined &&
@@ -62,15 +87,37 @@ export function normalizeAssistantTokenUsage(value: unknown): NormalizedAssistan
   };
 }
 
-/** A conservative UTF-8 upper bound plus provider/format overhead. */
+/**
+ * Reserves a per-call maximum before contacting the model. Every input string
+ * and the complete strict response-format definition are counted in UTF-8
+ * bytes (a conservative token upper bound); protocol framing has a fixed
+ * allowance. Oversized prompts and unbounded output settings fail closed.
+ */
 export function estimateMaxAssistantCallTokens(
   request: AssistantModelRequest,
   maxOutputTokens: number,
 ): number {
+  if (
+    !Number.isSafeInteger(maxOutputTokens) ||
+    maxOutputTokens < MIN_MAX_OUTPUT_TOKENS ||
+    maxOutputTokens > MAX_MAX_OUTPUT_TOKENS
+  ) {
+    throw new Error("Assistant model output limit is outside the supported range.");
+  }
+
   const inputBytes =
-    new TextEncoder().encode(request.instructions).byteLength +
-    new TextEncoder().encode(request.input).byteLength;
-  const estimate = inputBytes + maxOutputTokens + INPUT_TOKEN_SAFETY_MARGIN;
+    encoder.encode(request.instructions).byteLength +
+    encoder.encode(request.input).byteLength +
+    RESPONSE_FORMAT_BYTES;
+
+  if (inputBytes > MAX_ASSISTANT_MODEL_INPUT_BYTES) {
+    throw new Error("Assistant model input exceeds the supported byte limit.");
+  }
+
+  const estimate =
+    inputBytes +
+    maxOutputTokens +
+    ASSISTANT_MODEL_PROTOCOL_OVERHEAD_TOKENS;
 
   if (!Number.isSafeInteger(estimate) || estimate <= 0) {
     throw new Error("Assistant token reservation is outside the supported range.");
@@ -190,7 +237,10 @@ export function resolveAssistantTokenBudgetCoordinator(
   const isProduction =
     env.NODE_ENV === "production" || process.env.NODE_ENV === "production";
   if (isProduction) {
-    return injected?.scope === "deployment-shared" ? injected : null;
+    const sharedRuntimeVerified = env.SHARED_RUNTIME_VERIFIED === "true";
+    return sharedRuntimeVerified && injected?.scope === "deployment-shared"
+      ? injected
+      : null;
   }
   if (injected) return injected;
   return localDevelopmentBudget;

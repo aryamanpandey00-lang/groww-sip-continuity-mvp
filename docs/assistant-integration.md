@@ -5,29 +5,36 @@
 Phases 5 and 6B provide a **server-only, deterministic-first** assistant
 pipeline and secure API route for the fictional SIP Continuity demo. Phase 6C
 adds a responsive assistant UI with browser-session-only transcript state. The
-project still has no database, real SIP/payment integration or live-model
-evaluation report.
+project still has no real SIP/payment integration or live-model evaluation
+report.
 
-The pipeline can call the OpenAI Responses API only when all required
+The pipeline can call the Groq Chat Completions API via the OpenAI-compatible SDK only when all required
 configuration is present. Tests, fixture evaluation and the current dashboard
-run offline and never require a live key. **No live OpenAI call was made while
-implementing Phase 5.**
+run offline and never require a live key. A separate controlled live smoke test
+verified an evidence-grounded response using JSON Object mode; it did not verify
+concurrent behavior.
 
 ## Configuration and fail-closed behaviour
 
 | Variable | Required | Behaviour |
 | --- | --- | --- |
 | `ASSISTANT_ENABLED` | Yes, for the model path | Must be exactly `true`. Any other value disables the assistant. |
-| `OPENAI_API_KEY` | Yes, for the model path | Server-only. Never exposed through `NEXT_PUBLIC_*`, browser bundles, client requests, logs or prompts. |
-| `OPENAI_MODEL` | Yes, for the model path | Used exactly as configured. There is no hardcoded default or silent substitution. |
+| `GROQ_API_KEY` | Yes, for the model path | Server-only. Never exposed through `NEXT_PUBLIC_*`, browser bundles, client requests, logs or prompts. |
+| `GROQ_MODEL` | Yes, for the model path | Used exactly as configured. There is no hardcoded default or silent substitution. |
+| `GROQ_RESPONSE_FORMAT` | No | Defaults to `json_object`, matching the verified Groq model path. Provider mode guarantees JSON syntax; the application runtime schema, citation checks and safety gate remain mandatory. |
 | `MAX_OUTPUT_TOKENS` | No | Optional output limit, bounded to `64..2000`; defaults to `700`. |
+| `DATABASE_RUNTIME_URL` | Yes, for production shared quotas | Server-only connection URL for the restricted runtime database role. Never use owner or migration credentials. |
+| `SHARED_RUNTIME_VERIFIED` | Yes, before production shared coordination | Keep `false` until the shared database runtime and safeguards are independently verified. |
+| `ACTION_SESSION_SIGNING_SECRET` | For action previews and action-session endpoints | Server-only HMAC signing key; use at least 32 random bytes. It does not replace shared action-session storage. |
 
 Additional server-side limits:
 
 - request timeout: 15 seconds;
 - maximum user question length: 2,000 characters;
 - SDK retries: disabled;
-- `store: false` on the Responses API request.
+- No conversation or response storage fields are sent on the Chat Completions request.
+- production database quota: ten cumulative successful demo responses and a
+  100,000-token hourly budget, coordinated across deployments;
 
 Missing or invalid configuration returns `Assistant unavailable` without
 constructing a client or making a model call. `ASSISTANT_ENABLED=false` is the
@@ -37,9 +44,15 @@ default safe state.
 
 ```bash
 ASSISTANT_ENABLED=false
-OPENAI_API_KEY=
-OPENAI_MODEL=
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_RESPONSE_FORMAT=json_object
 MAX_OUTPUT_TOKENS=700
+# Server-only connection URL for the restricted runtime database role.
+# Never use the database owner or migration credentials here.
+DATABASE_RUNTIME_URL=
+ACTION_SESSION_SIGNING_SECRET=
+SHARED_RUNTIME_VERIFIED=false
 ```
 
 The API route also has a bounded in-memory, per-instance rate limiter for demo
@@ -60,14 +73,14 @@ All modules live under `src/lib/ai/`.
 | `context.ts` | Read-only context packet built from verified facts, retrieval results and requested values. |
 | `prompts.ts` | Fixed system rules, authoritative facts/evidence prompt and bounded repair prompt. |
 | `schemas.ts` | Strict JSON Schema for Structured Outputs plus a defensive parser and length checks. |
-| `client.ts` | Child-safe `server-only` OpenAI Responses API adapter. Loaded lazily only on the model path. |
+| `client.ts` | Child-safe `server-only` Groq Chat Completions API via the OpenAI-compatible SDK adapter. Loaded lazily only on the model path. |
 | `gate.ts` | Mandatory runtime safety gate; any critical failure blocks approval and display. |
 | `fallbacks.ts` | Deterministic safe responses, server-derived quality labels and the Phase 4 fallback mapping. |
 | `logger.ts` | Allowlisted structured request logging. |
 | `pipeline.ts` | Orchestration, one repair attempt, fallback selection and final result construction. |
 | `index.ts` | Public server-side exports. |
 
-The OpenAI SDK is imported only by `client.ts`, which starts with
+The OpenAI SDK is configured for GroqCloud and imported only by `client.ts`, which starts with
 `import "server-only";`. App and component layers do not import `src/lib/ai`.
 
 ## Deterministic intents
@@ -108,7 +121,9 @@ deterministic intent: a mismatch is a gate failure.
 5. Resolve configuration. Missing/disabled configuration returns
    `Assistant unavailable` without a model call.
 6. Call the model only when the path is approved. The request uses the configured
-   model, strict JSON Schema, bounded output tokens, timeout and `store: false`.
+   model, response format, bounded output tokens and timeout. JSON Object mode is
+   the default; strict JSON Schema mode can be selected explicitly. Both modes
+   require the same runtime schema and evidence gates.
 7. Run the runtime gate.
 8. On repairable failure, make **one** repair request with failure codes and a
    bounded rejected-output snippet, then run the gate again.
@@ -242,31 +257,42 @@ Each request emits one JSON event through an injectable logger. The allowlist is
 The logger does not include the API key, prompts, system instructions, user
 questions, answer text, credentials or personal data. The current implementation
 adds usage from the initial and repair calls, including invalid or incomplete
-Responses API results. Missing or inconsistent usage is marked incomplete. A
+Chat Completions results. Missing or inconsistent usage is marked incomplete. A
 budget reservation is charged at its reserved maximum when actual usage cannot
 be trusted.
 
 Each attempt reserves a conservative input-plus-output token bound before the
 model call. Local development uses a process-local hourly budget. Production
-requires an injected coordinator whose reservations and settlements are atomic
-across the deployment; without one, the model path returns unavailable before
-calling the provider. No shared coordinator is included in this repository.
+uses PostgreSQL-backed deployment-shared token-budget and demo-quota coordinators.
+The production model path returns unavailable unless the shared runtime is
+explicitly marked verified. Real concurrent production behavior remains
+unverified.
 
 ## OpenAI SDK approach
 
-Phase 5 uses `openai@6.49.0` and the Responses API:
+The Groq adapter uses `openai@6.49.0` and Chat Completions:
 
-- `client.responses.create(...)`;
-- `instructions` for the fixed system rules;
-- `input` for the authoritative facts/evidence packet and untrusted question;
-- `text.format` with `type: "json_schema"`, `strict: true` and the versioned
-  schema name `groww_sip_assistant_response_v1`;
-- `max_output_tokens` from configuration;
+- `client.chat.completions.create(...)`;
+- `messages` with a system message for fixed rules and a user message for the
+  authoritative facts/evidence packet and untrusted question;
+- `response_format` with either `type: "json_schema"`, `strict: true` and the
+  versioned schema name `groww_sip_assistant_response_v1`, or `type: "json_object"`;
+- both modes receive explicit instructions to return exactly one JSON object with
+  the required assistant fields and types; JSON Object mode relies on the runtime
+  parser and safety gate for schema enforcement;
+- array item-count constraints are enforced by the existing runtime parser
+  because `maxItems` is omitted from the provider schema;
+- `max_completion_tokens` from configuration;
 - `timeout` and `maxRetries: 0` at both the client and request level;
-- `store: false`;
-- usage read only from the API response;
+- usage read from `prompt_tokens`, `completion_tokens` and `total_tokens`; nested
+  reasoning details are not added a second time;
 - SDK errors mapped to safe timeout/unavailable codes without exposing error
   text.
+
+Groq documents JSON Object mode for all models, including `openai/gpt-oss-20b`.
+It guarantees JSON syntax only. The assistant therefore rejects malformed JSON,
+missing or extra fields, invalid action values, unsupported citations, and
+incomplete token usage through its existing fail-closed application gates.
 
 The client is constructed lazily on the model path so offline deterministic
 paths do not instantiate the SDK.
@@ -471,7 +497,7 @@ including preview/confirm/cancel/reset, stale versions, expiry, invalid
 signatures, duplicate/concurrent confirmations, and same-process preview replay
 after replacement. Phase 5 mocked-pipeline tests cover gate failures,
 citations, fallback, timeout, repair and AI action authorization. No test makes
-a live OpenAI call. Accessibility markup and keyboard semantics are checked in
+a live GroqCloud call. Accessibility markup and keyboard semantics are checked in
 available tests; focus behavior should still receive a separate manual
 keyboard/screen-reader review after DOM tooling can be installed.
 

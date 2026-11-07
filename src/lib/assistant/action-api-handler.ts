@@ -33,12 +33,18 @@ import type {
 } from "./action-contracts";
 import {
   actionSessionSetCookie,
+  createActionDemoSession,
+  hashActionSessionToken,
   getSignedActionSessionToken,
   isSigningSecretReady,
   readSignedActionSession,
   signActionDemoSession,
   type ActionDemoSession,
 } from "./action-session";
+import type {
+  ActionSessionExpectation,
+  SharedActionSessionStore,
+} from "./action-session-store";
 import {
   confirmActionPreview,
   prepareActionPreview,
@@ -56,6 +62,7 @@ export interface ActionApiHandlerDependencies {
   rateLimiter?: RateLimiter;
   requestIdFactory?: () => string;
   now?: () => number;
+  sessionStore?: SharedActionSessionStore;
 }
 
 interface RequestContext {
@@ -64,6 +71,7 @@ interface RequestContext {
   nowMs: number;
   secret: string;
   lease: Extract<ReturnType<RateLimiter["acquire"]>, { allowed: true }>;
+  sessionStore?: SharedActionSessionStore;
 }
 
 type PreparedBody =
@@ -157,6 +165,7 @@ async function prepareRequest(
   env: Record<string, string | undefined>,
   now: () => number,
   limiter: RateLimiter,
+  sessionStore?: SharedActionSessionStore,
 ): Promise<PreparedBody> {
   if (!hasSameOrigin(request)) {
     return {
@@ -170,7 +179,11 @@ async function prepareRequest(
       response: error(requestId, "UNSUPPORTED_MEDIA_TYPE", "Send this request as application/json.", 415),
     };
   }
-  if (env.NODE_ENV === "production") {
+  if (
+    env.NODE_ENV === "production" &&
+    (sessionStore?.scope !== "deployment-shared" ||
+      env.SHARED_RUNTIME_VERIFIED !== "true")
+  ) {
     return {
       ok: false,
       response: error(
@@ -238,6 +251,7 @@ async function prepareRequest(
         nowMs,
         secret: env.ACTION_SESSION_SIGNING_SECRET,
         lease,
+        sessionStore,
       },
     };
   } catch {
@@ -296,7 +310,7 @@ export function createActionApiHandlers(
 
   async function prepare(request: Request, requestId: string): Promise<PreparedBody> {
     try {
-      return await prepareRequest(request, requestId, env, now, limiter);
+      return await prepareRequest(request, requestId, env, now, limiter, dependencies.sessionStore);
     } catch {
       console.error(JSON.stringify({ event: "assistant_action_api_error", requestId }));
       return {
@@ -314,6 +328,71 @@ export function createActionApiHandlers(
       try {
         if (!validatePreviewRequest(prepared.value)) {
           return error(requestId, "INVALID_REQUEST", "The simulated action request is invalid.", 400);
+        }
+        if (prepared.context.sessionStore) {
+          const cookieHeader = request.headers.get("cookie");
+          const read = readSignedActionSession(
+            cookieHeader,
+            prepared.context.secret,
+            prepared.context.nowMs,
+          );
+          if (read.status === "INVALID" || read.status === "EXPIRED") {
+            return sessionError(requestId, read.status);
+          }
+
+          let session: ActionDemoSession;
+          let expected: ActionSessionExpectation | null = null;
+          if (read.status === "MISSING") {
+            session = createActionDemoSession(prepared.value.scenario, prepared.context.nowMs);
+          } else {
+            const signedToken = getSignedActionSessionToken(cookieHeader);
+            if (!signedToken) return sessionError(requestId, "INVALID");
+            expected = {
+              sessionId: read.session.sessionId,
+              cookieHash: hashActionSessionToken(signedToken),
+              stateVersion: read.session.stateVersion,
+            };
+            const current = await prepared.context.sessionStore.load(expected);
+            if (!current) return sessionError(requestId, "INVALID");
+            session = current.scenario === prepared.value.scenario
+              ? current
+              : resetActionSession(prepared.value.scenario, prepared.context.nowMs);
+          }
+
+          const action = practiceActionToDomainRequest(session.state, prepared.value.action);
+          const result = prepareActionPreview({
+            session,
+            action,
+            source: "DETERMINISTIC_DEMO_PRACTICE",
+            secret: prepared.context.secret,
+            nowMs: prepared.context.nowMs,
+          });
+          const persisted = expected
+            ? await prepared.context.sessionStore.replace(
+                expected,
+                result.session,
+                hashActionSessionToken(result.token),
+              )
+            : await prepared.context.sessionStore.create(
+                result.session,
+                hashActionSessionToken(result.token),
+              );
+          if (!persisted) {
+            return expected
+              ? sessionError(requestId, "INVALID")
+              : error(requestId, "SHARED_STATE_UNAVAILABLE", "The shared action session could not be created.", 503);
+          }
+          const body: ActionPreviewResponse = {
+            requestId,
+            status: result.status,
+            preview: result.preview,
+          };
+          return setSessionCookie(
+            json(requestId, body),
+            result.session,
+            result.token,
+            prepared.context,
+          );
         }
         const resolved = resolveSignedSession({
           cookieHeader: request.headers.get("cookie"),
@@ -388,6 +467,36 @@ export function createActionApiHandlers(
         }
         if (read.status === "MISSING") {
           return error(requestId, "INVALID_SESSION", "No active demo session was found. Create a new preview.", 401);
+        }
+        if (prepared.context.sessionStore) {
+          const signedToken = getSignedActionSessionToken(request.headers.get("cookie"));
+          if (!signedToken) return sessionError(requestId, "INVALID");
+          const expected: ActionSessionExpectation = {
+            sessionId: read.session.sessionId,
+            cookieHash: hashActionSessionToken(signedToken),
+            stateVersion: read.session.stateVersion,
+          };
+          const session = await prepared.context.sessionStore.load(expected);
+          if (!session) return sessionError(requestId, "INVALID");
+          const result = confirmActionPreview({
+            session,
+            previewId: prepared.value.previewId,
+            confirmed: prepared.value.confirmed,
+            nowMs: prepared.context.nowMs,
+          });
+          if (!result.consumed) return previewNotFoundResponse(requestId, session);
+
+          const token = signActionDemoSession(result.session, prepared.context.secret);
+          const persisted = await prepared.context.sessionStore.confirm(
+            expected,
+            prepared.value.previewId,
+            result.response.status === "APPLIED_SIMULATED",
+            result.session,
+            hashActionSessionToken(token),
+          );
+          if (!persisted) return previewNotFoundResponse(requestId, session);
+          const response = json(requestId, toOperationResponse(result.response, requestId));
+          return setSessionCookie(response, result.session, token, prepared.context);
         }
         const session = read.session;
         if (isActionPreviewConsumed(prepared.value.previewId, prepared.context.nowMs)) {
@@ -472,6 +581,35 @@ export function createActionApiHandlers(
           prepared.context.secret,
           prepared.context.nowMs,
         );
+        if (prepared.context.sessionStore) {
+          let expected: ActionSessionExpectation | null = null;
+          if (previous.status === "VALID" || previous.status === "EXPIRED") {
+            const signedToken = getSignedActionSessionToken(request.headers.get("cookie"));
+            if (!signedToken) return sessionError(requestId, "INVALID");
+            expected = {
+              sessionId: previous.session.sessionId,
+              cookieHash: hashActionSessionToken(signedToken),
+              stateVersion: previous.session.stateVersion,
+            };
+          }
+          const scenario = prepared.value.scenario ?? "BASE";
+          const session = resetActionSession(scenario, prepared.context.nowMs);
+          const token = signActionDemoSession(session, prepared.context.secret);
+          const persisted = await prepared.context.sessionStore.reset(
+            expected,
+            session,
+            hashActionSessionToken(token),
+          );
+          if (!persisted) return sessionError(requestId, "INVALID");
+          const body: ActionOperationResponse = {
+            requestId,
+            status: "RESET",
+            message: "The fictional demo state was reset to its original scenario.",
+            stateSummary: stateSummary(scenario, session.state),
+            result: null,
+          };
+          return setSessionCookie(json(requestId, body), session, token, prepared.context);
+        }
         if (previous.status === "VALID" && previous.session.pendingPreview) {
           markActionPreviewConsumed(
             previous.session.pendingPreview.previewId,

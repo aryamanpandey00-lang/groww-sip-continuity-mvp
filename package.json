@@ -13,11 +13,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ai:smoke": "node --conditions=react-server --import tsx scripts/assistant-smoke.ts",
+    "groq:diagnostic": "node --import tsx scripts/groq-chat-diagnostic.ts",
     "golden:validate": "tsx src/lib/evaluation/cli.ts validate",
     "eval:fixture": "tsx src/lib/evaluation/cli.ts fixture",
     "eval:report": "tsx src/lib/evaluation/cli.ts report"
   },
   "dependencies": {
+    "@neondatabase/serverless": "1.2.0",
     "next": "16.4.3",
     "openai": "^6.49.0",
     "react": "19.3.0",

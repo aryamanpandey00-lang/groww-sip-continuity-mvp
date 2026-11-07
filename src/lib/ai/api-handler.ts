@@ -24,6 +24,7 @@ import {
 } from "./rate-limit";
 import type {
   AssistantDependencies,
+  AssistantDemoQuotaCoordinator,
   AssistantRequest,
   AssistantTokenBudgetCoordinator,
 } from "./types";
@@ -38,6 +39,7 @@ export interface AssistantApiHandlerDependencies {
   now?: () => number;
   env?: Record<string, string | undefined>;
   budgetCoordinator?: AssistantTokenBudgetCoordinator;
+  demoQuotaCoordinator?: AssistantDemoQuotaCoordinator;
 }
 
 function responseHeaders(): Headers {
@@ -173,6 +175,9 @@ export function createAssistantApiHandler(
       }
       if (dependencies.budgetCoordinator) {
         assistantDependencies.budgetCoordinator = dependencies.budgetCoordinator;
+      }
+      if (dependencies.demoQuotaCoordinator) {
+        assistantDependencies.demoQuotaCoordinator = dependencies.demoQuotaCoordinator;
       }
 
       const result = await runner(assistantRequest, assistantDependencies);

@@ -123,9 +123,12 @@ export const ASSISTANT_FALLBACK_REASONS = [
 export type AssistantFallbackReason =
   (typeof ASSISTANT_FALLBACK_REASONS)[number];
 
+export type AssistantResponseFormat = "json_schema" | "json_object";
+
 export interface AssistantConfig {
   apiKey: string;
   model: string;
+  responseFormat: AssistantResponseFormat;
   maxOutputTokens: number;
   requestTimeoutMs: number;
   maxInputChars: number;
@@ -135,6 +138,7 @@ export type AssistantConfigUnavailableReason =
   | "ASSISTANT_DISABLED"
   | "MISSING_API_KEY"
   | "MISSING_MODEL"
+  | "INVALID_RESPONSE_FORMAT"
   | "INVALID_MAX_OUTPUT_TOKENS";
 
 export type AssistantConfigResolution =
@@ -166,16 +170,162 @@ export interface AssistantTokenUsage {
   totalTokens?: number;
 }
 
+export type AssistantProviderErrorCategory =
+  | "configuration_error"
+  | "schema_error"
+  | "network_error"
+  | "sdk_error"
+  | "provider_error"
+  | "invalid_request"
+  | "authentication"
+  | "permission_denied"
+  | "not_found"
+  | "request_too_large"
+  | "unprocessable_entity"
+  | "rate_limit"
+  | "conflict"
+  | "capacity_exceeded"
+  | "request_cancelled"
+  | "upstream_error"
+  | "timeout"
+  | "response_error"
+  | "adapter_error";
+
+export type AssistantTransportCause =
+  | "dns"
+  | "tls"
+  | "timeout"
+  | "connection_reset"
+  | "connection_refused"
+  | "network_unreachable"
+  | "unknown";
+
+export type AssistantNetworkFamily = "ipv4" | "ipv6";
+
+export type AssistantProviderErrorType =
+  | "invalid_request_error"
+  | "authentication_error"
+  | "permission_error"
+  | "not_found_error"
+  | "rate_limit_error"
+  | "server_error";
+
+export type AssistantProviderRequestParameter =
+  | "model"
+  | "messages"
+  | "max_completion_tokens"
+  | "max_tokens"
+  | "response_format"
+  | "response_format.json_schema"
+  | "temperature"
+  | "top_p"
+  | "n"
+  | "stop"
+  | "stream"
+  | "tools"
+  | "tool_choice";
+
+export type AssistantSchemaKeyword =
+  | "additionalProperties"
+  | "anyOf"
+  | "const"
+  | "default"
+  | "description"
+  | "enum"
+  | "exclusiveMaximum"
+  | "exclusiveMinimum"
+  | "format"
+  | "items"
+  | "maxItems"
+  | "maxLength"
+  | "maximum"
+  | "minItems"
+  | "minLength"
+  | "minimum"
+  | "multipleOf"
+  | "oneOf"
+  | "pattern"
+  | "properties"
+  | "required"
+  | "type"
+  | "uniqueItems";
+
+export type AssistantValidationCategory =
+  | "empty_output"
+  | "invalid_json"
+  | "invalid_root_type"
+  | "output_too_large"
+  | "missing_field"
+  | "unexpected_field"
+  | "invalid_type"
+  | "invalid_enum"
+  | "invalid_value"
+  | "item_limit_exceeded"
+  | "invalid_action_shape"
+  | "invalid_citation"
+  | "missing_citation"
+  | "duplicate_citation";
+
+/** Fixed allowlist of JSON paths; unrecognized model keys map to `unknown`. */
+export type AssistantValidationFieldPath =
+  | "$"
+  | "unknown"
+  | "intent"
+  | "directAnswer"
+  | "keyPoints"
+  | "citedEvidenceIds"
+  | "proposedAction"
+  | "proposedAction.type"
+  | "proposedAction.cycleId"
+  | "proposedAction.amount"
+  | "proposedAction.debitDay"
+  | "followUpQuestion"
+  | "refusal";
+
+export interface AssistantValidationDiagnostic {
+  category: AssistantValidationCategory;
+  fieldPath: AssistantValidationFieldPath;
+}
+
+/** Safe allowlisted provider metadata; never contains request bodies or messages. */
+export interface AssistantProviderDiagnostic {
+  httpStatus: number | null;
+  errorCategory: AssistantProviderErrorCategory;
+  requestId: string | null;
+  transportCause?: AssistantTransportCause;
+  networkFamily?: AssistantNetworkFamily;
+  providerErrorType?: AssistantProviderErrorType;
+  requestParameter?: AssistantProviderRequestParameter;
+  schemaKeyword?: AssistantSchemaKeyword;
+  validationDiagnostics?: AssistantValidationDiagnostic[];
+}
+
 export type AssistantModelCallResult =
   | {
       status: "OK";
       outputText: string;
       modelId?: string;
       usage?: AssistantTokenUsage;
+      providerDiagnostic?: AssistantProviderDiagnostic;
     }
-  | { status: "TIMEOUT"; errorCode?: string; usage?: AssistantTokenUsage }
-  | { status: "UNAVAILABLE"; errorCode?: string; usage?: AssistantTokenUsage }
-  | { status: "INVALID_OUTPUT"; errorCode?: string; usage?: AssistantTokenUsage };
+  | {
+      status: "TIMEOUT";
+      errorCode?: string;
+      usage?: AssistantTokenUsage;
+      providerDiagnostic?: AssistantProviderDiagnostic;
+    }
+  | {
+      status: "UNAVAILABLE";
+      errorCode?: string;
+      usage?: AssistantTokenUsage;
+      providerDiagnostic?: AssistantProviderDiagnostic;
+    }
+  | {
+      status: "INVALID_OUTPUT";
+      errorCode?: string;
+      usage?: AssistantTokenUsage;
+      providerDiagnostic?: AssistantProviderDiagnostic;
+    };
 
 export interface AssistantTokenBudgetReservation {
   /** Settle with reported usage, or null to charge the full reservation. */
@@ -191,6 +341,20 @@ export interface AssistantTokenBudgetCoordinator {
     maxTokens: number;
     nowMs: number;
   }): Promise<AssistantTokenBudgetReservation | null> | AssistantTokenBudgetReservation | null;
+}
+
+export interface AssistantDemoQuotaReservation {
+  /** Consume one successful-response slot, or release it after a failed response. */
+  settle(success: boolean): Promise<void> | void;
+}
+
+export interface AssistantDemoQuotaCoordinator {
+  /** Production quotas must be atomic across the whole deployment. */
+  scope: "deployment-shared" | "process-local";
+  reserve(input: {
+    reservationId: string;
+    nowMs: number;
+  }): Promise<AssistantDemoQuotaReservation | null> | AssistantDemoQuotaReservation | null;
 }
 
 export interface AssistantModelClient {
@@ -294,6 +458,7 @@ export interface RuntimeGateFailure {
 export interface RuntimeGateResult {
   passed: boolean;
   criticalFailures: RuntimeGateFailure[];
+  validationDiagnostics?: AssistantValidationDiagnostic[];
   checkedAt: string;
   qualityLabel: AssistantQualityLabel | null;
 }
@@ -361,6 +526,7 @@ export interface AssistantLogEvent {
   modelCalls: number;
   tokenUsageComplete: boolean;
   repairAttempted: boolean;
+  providerDiagnostic?: AssistantProviderDiagnostic | null;
   timestamp: string;
 }
 
@@ -371,6 +537,9 @@ export interface AssistantDependencies {
   config?: AssistantConfig;
   modelClient?: AssistantModelClient;
   budgetCoordinator?: AssistantTokenBudgetCoordinator;
+  demoQuotaCoordinator?: AssistantDemoQuotaCoordinator;
+  /** Internal smoke-test control; false withholds invalid output without a repair call. */
+  allowRepair?: boolean;
   log?: AssistantLogSink;
   requestId?: string;
   now?: () => Date;

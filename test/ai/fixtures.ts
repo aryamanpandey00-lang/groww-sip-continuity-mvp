@@ -18,6 +18,7 @@ import type {
 export const READY_CONFIG = {
   apiKey: "test-api-key-not-real",
   model: "configured-test-model",
+  responseFormat: "json_schema",
   maxOutputTokens: 700,
   requestTimeoutMs: 1_000,
   maxInputChars: 2_000,

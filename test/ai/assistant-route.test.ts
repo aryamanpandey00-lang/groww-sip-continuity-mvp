@@ -182,11 +182,37 @@ describe("POST /api/assistant", () => {
       ].sort(),
     );
     expect(modelClient.calls).toHaveLength(1);
-    expect(JSON.stringify(body)).not.toContain("OPENAI_API_KEY");
+    expect(JSON.stringify(body)).not.toContain("GROQ_API_KEY");
     expect(JSON.stringify(body)).not.toContain("instructions");
     expect(JSON.stringify(body)).not.toContain("gateResult");
     expect(JSON.stringify(body)).not.toContain("tokenUsage");
     expect(JSON.stringify(body)).not.toContain("cycle_2026_11");
+  });
+
+  it("passes shared budget and demo quota coordinators into the assistant pipeline", async () => {
+    const budgetCoordinator = {
+      scope: "deployment-shared" as const,
+      reserve: vi.fn(() => null),
+    };
+    const demoQuotaCoordinator = {
+      scope: "deployment-shared" as const,
+      reserve: vi.fn(() => null),
+    };
+    const runner = vi.fn(async (_request, dependencies) => {
+      expect(dependencies?.budgetCoordinator).toBe(budgetCoordinator);
+      expect(dependencies?.demoQuotaCoordinator).toBe(demoQuotaCoordinator);
+      return result();
+    });
+    const handler = makeHandler({
+      runAssistant: runner,
+      budgetCoordinator,
+      demoQuotaCoordinator,
+    });
+
+    const response = await handler(makeRequest(JSON.stringify({ question: "What is a SIP?" })));
+
+    expect(response.status).toBe(200);
+    expect(runner).toHaveBeenCalledTimes(1);
   });
 
   it("creates an AI-proposed preview only after the approved gate result and deterministic revalidation", async () => {
@@ -565,7 +591,7 @@ describe("POST /api/assistant", () => {
     const response = await makeHandler({
       env: {
         ASSISTANT_ENABLED: "true",
-        OPENAI_MODEL: "configured-test-model",
+        GROQ_MODEL: "configured-test-model",
       },
     })(makeRequest(JSON.stringify({ question: "What is a SIP?" })));
     const bodyText = await response.text();
@@ -574,7 +600,7 @@ describe("POST /api/assistant", () => {
     expect(bodyText).toContain('"status":"UNAVAILABLE"');
     expect(bodyText).toContain('"qualityLabel":"Assistant unavailable"');
     expect(bodyText).not.toContain("MISSING_API_KEY");
-    expect(bodyText).not.toContain("OPENAI_API_KEY");
+    expect(bodyText).not.toContain("GROQ_API_KEY");
   });
 
   it("keeps the official-evidence fallback and makes no model call", async () => {
